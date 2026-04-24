@@ -42,6 +42,19 @@ def main() -> None:
              "fixed test set. 'loo': leave-one-out over the full dataset, "
              "aggregated metrics per (k, mode, seed).",
     )
+    p.add_argument(
+        "--test-size", type=float, default=None,
+        help="Fraction of rows held out as the test set in proportional mode "
+             "(must be in (0, 1)). Default: per-dataset value from CONFIG "
+             "(usually 0.2). Ignored when --split-mode=loo.",
+    )
+    p.add_argument(
+        "--jitter-sigma", type=float, default=None,
+        help="Gaussian std added to each X cell in mode=jitter "
+             "(must be >= 0). Default: CONFIG['row_probe']['jitter_sigma'] "
+             "(currently 1e-6). 0 makes jitter numerically identical to exact; "
+             "used only when 'jitter' is in --modes.",
+    )
     p.add_argument("--out", type=Path, default=REPO / "results",
                    help="Results root. Row artefacts go to <out>/<dataset>/row/.")
     p.add_argument("--fresh", action="store_true",
@@ -74,6 +87,8 @@ def main() -> None:
             args.seeds,
             include_tabpfn=not args.no_tabpfn,
             split_mode=args.split_mode,
+            test_size=args.test_size,
+            jitter_sigma=args.jitter_sigma,
         )
 
 

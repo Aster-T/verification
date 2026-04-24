@@ -206,7 +206,8 @@ skip 条目写成 `{"skipped": true, "reason": "...", <base fields>}`,**不**配
 
 ### 性能提示
 
-- TabPFN 在 `n_ctx > CONFIG["tabpfn"]["context_limit_n"]`(默认 10000)时自动 skip
+- TabPFN 对 n_ctx 没有硬上限;只有在 fit / predict 真正抛异常(通常是 OOM)
+  时才 skip,skip 记录里的 `reason` 带真实 exception type
 - LOO + TabPFN:成本约 N × |k_list| × |modes| × |seeds| 次 fit。**小数据集才用**
 
 ---

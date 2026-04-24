@@ -172,3 +172,63 @@ def test_invalid_split_mode_raises(tmp_path):
             k_list=[1], modes=["exact"], seeds=[0],
             include_tabpfn=False, split_mode="stratified-bootstrap",
         )
+
+
+def test_test_size_override_changes_n_query(tmp_path):
+    """CLI-supplied --test-size overrides CONFIG and shows up in n_query."""
+    # diabetes has N=442. Default test_size=0.2 -> n_query=89.
+    # Override to 0.4 -> n_query = round(442 * 0.4) = 177 (sklearn's rounding).
+    run_row_probe(
+        dataset="diabetes", row_dir=tmp_path,
+        k_list=[1], modes=["exact"], seeds=[0],
+        include_tabpfn=False, split_mode="proportional",
+        test_size=0.4,
+    )
+    rec = _records(tmp_path)[0]
+    assert rec["split_mode"] == "proportional"
+    # n_query scales with test_size; explicit check — sklearn uses ceil/round
+    # but for 442*0.4=176.8 it gives 177. Accept ±1 to be tolerant.
+    assert 176 <= rec["n_query"] <= 178, rec["n_query"]
+    # And n_ctx should drop correspondingly (k=1, so n_ctx == n_tr == 442-n_query).
+    assert rec["n_ctx"] + rec["n_query"] == 442
+
+
+def test_test_size_out_of_range_raises(tmp_path):
+    for bad in (0.0, 1.0, -0.1, 1.5):
+        with pytest.raises(ValueError, match="test_size"):
+            run_row_probe(
+                dataset="diabetes", row_dir=tmp_path,
+                k_list=[1], modes=["exact"], seeds=[0],
+                include_tabpfn=False, test_size=bad,
+            )
+
+
+def test_jitter_sigma_zero_equals_exact(tmp_path):
+    """jitter_sigma=0 makes 'jitter' numerically identical to 'exact'."""
+    run_row_probe(
+        dataset="diabetes", row_dir=tmp_path,
+        k_list=[2], modes=["exact", "jitter"], seeds=[0],
+        include_tabpfn=False, jitter_sigma=0.0,
+    )
+    recs = {r["mode"]: r for r in _records(tmp_path)}
+    assert recs["exact"]["nrmse"] == recs["jitter"]["nrmse"]
+
+
+def test_jitter_sigma_large_diverges_from_exact(tmp_path):
+    """Big sigma materially perturbs the OLS fit, so nRMSE should differ."""
+    run_row_probe(
+        dataset="diabetes", row_dir=tmp_path,
+        k_list=[2], modes=["exact", "jitter"], seeds=[0],
+        include_tabpfn=False, jitter_sigma=0.5,  # huge compared to default 1e-6
+    )
+    recs = {r["mode"]: r for r in _records(tmp_path)}
+    assert recs["exact"]["nrmse"] != recs["jitter"]["nrmse"]
+
+
+def test_jitter_sigma_negative_raises(tmp_path):
+    with pytest.raises(ValueError, match="jitter_sigma"):
+        run_row_probe(
+            dataset="diabetes", row_dir=tmp_path,
+            k_list=[1], modes=["exact"], seeds=[0],
+            include_tabpfn=False, jitter_sigma=-1.0,
+        )

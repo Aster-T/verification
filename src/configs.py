@@ -84,7 +84,6 @@ CONFIG = {
         "device": "cuda",
         "n_estimators": 1,
         "ignore_pretraining_limits": True,
-        "context_limit_n": 10_000,  # v2 soft limit; row_probe skips beyond this
     },
     # -------------------------------------------------------------------------
     # Column probe (03)
@@ -97,9 +96,9 @@ CONFIG = {
     # Row probe (04)
     # -------------------------------------------------------------------------
     "row_probe": {
-        "k_list": [1, 2, 3, 5, 10],
+        "k_list": [i for i in range(1, 11)],
         "modes": ["exact", "jitter"],
-        "seeds": [0, 1, 2],
+        "seeds": [42],
         "jitter_sigma": 1e-6,
         "metrics": ["r2", "rmse", "mae"],
     },
@@ -233,7 +232,9 @@ def load_openml_config(path: str | Path) -> dict[str, dict]:
 
 
 def _register_from_preset(
-    preset_name: str, entry: dict, cli_subsample: int,
+    preset_name: str,
+    entry: dict,
+    cli_subsample: int,
 ) -> str:
     """Register one preset entry. Preset-level subsample overrides CLI."""
     oid = int(entry["id"])
@@ -249,7 +250,8 @@ def _subsample_cli_type(s: str) -> int | None:
 
 
 def add_openml_cli_args(
-    parser: argparse.ArgumentParser, default_subsample: int | None = None,
+    parser: argparse.ArgumentParser,
+    default_subsample: int | None = None,
 ) -> None:
     """
     Install the standard OpenML CLI args on `parser`. Every CLI script that
@@ -257,27 +259,36 @@ def add_openml_cli_args(
     call this to stay consistent.
     """
     parser.add_argument(
-        "--openml-id", action="append", default=[],
+        "--openml-id",
+        action="append",
+        default=[],
         metavar="ID[:NAME]",
         help="OpenML data_id, repeatable. '560' -> 'openml_560'; "
-             "'560:bodyfat' uses custom name 'bodyfat'.",
+        "'560:bodyfat' uses custom name 'bodyfat'.",
     )
     parser.add_argument(
-        "--openml-preset", action="append", default=[],
+        "--openml-preset",
+        action="append",
+        default=[],
         metavar="NAME",
         help=f"Load a preset (by its key) from --openml-config (default: "
-             f"{DEFAULT_OPENML_CONFIG.relative_to(REPO_ROOT)}). Repeatable.",
+        f"{DEFAULT_OPENML_CONFIG.relative_to(REPO_ROOT)}). Repeatable.",
     )
     parser.add_argument(
-        "--openml-all", action="store_true",
+        "--openml-all",
+        action="store_true",
         help="Load every preset from --openml-config.",
     )
     parser.add_argument(
-        "--openml-config", type=Path, default=DEFAULT_OPENML_CONFIG,
+        "--openml-config",
+        type=Path,
+        default=DEFAULT_OPENML_CONFIG,
         help="Path to the OpenML preset JSON file.",
     )
     parser.add_argument(
-        "--openml-subsample", type=_subsample_cli_type, default=default_subsample,
+        "--openml-subsample",
+        type=_subsample_cli_type,
+        default=default_subsample,
         help=(
             "Row cap per OpenML dataset when a preset does not set its own. "
             "Pass 0 or any non-positive int to mean 'no cap'. Default: no cap "
@@ -295,9 +306,13 @@ def resolve_openml_args(args: argparse.Namespace) -> list[str]:
     names: list[str] = []
     for spec in getattr(args, "openml_id", []) or []:
         oid, custom_name = parse_openml_spec(spec)
-        names.append(register_openml_dataset(
-            oid, subsample=args.openml_subsample, name=custom_name,
-        ))
+        names.append(
+            register_openml_dataset(
+                oid,
+                subsample=args.openml_subsample,
+                name=custom_name,
+            )
+        )
 
     wants_presets = bool(getattr(args, "openml_all", False)) or bool(
         getattr(args, "openml_preset", []) or []
@@ -317,7 +332,9 @@ def resolve_openml_args(args: argparse.Namespace) -> list[str]:
                 f"available: {sorted(presets.keys())}"
             )
     for pname in preset_names:
-        names.append(_register_from_preset(pname, presets[pname], args.openml_subsample))
+        names.append(
+            _register_from_preset(pname, presets[pname], args.openml_subsample)
+        )
     return names
 
 

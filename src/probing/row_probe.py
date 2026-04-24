@@ -28,8 +28,8 @@ OUTPUT LAYOUT (for a given dataset, under `row_dir`):
      n_ctx / n_query describe a SINGLE model invocation:
        proportional:  n_ctx = k×n_tr,  n_query = n_te,  n_folds = 1
        loo:           n_ctx = k×(N-1), n_query = 1,     n_folds = N
-     Skipped records:
-       {"skipped": true, "reason": "...", <base fields>}
+     Skipped records (only written when fit/predict itself raises):
+       {"skipped": true, "reason": "<ExceptionType>: <msg>", <base fields>}
 
   predictions_<model>_<split>_<mode>_k<k>_s<seed>.csv
      Per-combo detail. Columns: id, y_true, y_pred, residual.
@@ -47,9 +47,10 @@ from pathlib import Path
 
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
-from src.configs import CONFIG, get_device
-from src.data.loaders import load_dataset, load_dataset_full
+from src.configs import CONFIG, get_dataset_cfg, get_device
+from src.data.loaders import load_dataset_full
 from src.models.mlr_wrapper import MLRWithW
 from src.utils.io import ensure_dir, write_jsonl
 from src.utils.seed import set_seed
@@ -65,10 +66,16 @@ def duplicate_context(
     k: int,
     mode: str,
     rng: np.random.Generator,
+    jitter_sigma: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Tile (X, y) k-fold. In "jitter" mode, add N(0, sigma) noise to every
-    duplicated X cell (sigma from CONFIG["row_probe"]["jitter_sigma"]).
+    duplicated X cell.
+
+    ARGS:
+      jitter_sigma: if None, read CONFIG["row_probe"]["jitter_sigma"]
+        (usually 1e-6). Explicit values override the config; 0.0 makes
+        "jitter" numerically identical to "exact".
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
@@ -77,8 +84,12 @@ def duplicate_context(
     X_rep = np.tile(X, (k, 1))
     y_rep = np.tile(y, k)
     if mode == "jitter":
-        sigma = CONFIG["row_probe"]["jitter_sigma"]
-        X_rep = X_rep + rng.standard_normal(X_rep.shape) * sigma
+        sigma = (CONFIG["row_probe"]["jitter_sigma"]
+                 if jitter_sigma is None else jitter_sigma)
+        if sigma < 0:
+            raise ValueError(f"jitter_sigma must be >= 0, got {sigma}")
+        if sigma > 0:
+            X_rep = X_rep + rng.standard_normal(X_rep.shape) * sigma
     return X_rep.astype(np.float64, copy=False), y_rep.astype(np.float64, copy=False)
 
 
@@ -149,11 +160,19 @@ def _run_proportional(
     modes: list[str],
     seeds: list[int],
     models: list[str],
-    n_ctx_limit: int,
+    test_size: float | None = None,
+    jitter_sigma: float | None = None,
 ) -> None:
+    effective_test_size = (
+        test_size if test_size is not None
+        else float(get_dataset_cfg(dataset).get("test_size", 0.2))
+    )
     for seed in seeds:
         set_seed(seed)
-        X_tr, y_tr, X_te, y_te, _names, is_nominal = load_dataset(dataset, seed)
+        X, y, _names, is_nominal = load_dataset_full(dataset, seed)
+        X_tr, X_te, y_tr, y_te = train_test_split(
+            X, y, test_size=effective_test_size, random_state=seed,
+        )
         n_tr_original = X_tr.shape[0]
         n_query = X_te.shape[0]
         n_features = X_tr.shape[1]
@@ -164,7 +183,9 @@ def _run_proportional(
                 rng = np.random.default_rng(np.random.SeedSequence(
                     entropy=[seed, k, 0 if mode == "exact" else 1],
                 ))
-                X_ctx, y_ctx = duplicate_context(X_tr, y_tr, k, mode, rng)
+                X_ctx, y_ctx = duplicate_context(
+                    X_tr, y_tr, k, mode, rng, jitter_sigma=jitter_sigma,
+                )
 
                 for model in models:
                     base_rec = {
@@ -179,13 +200,6 @@ def _run_proportional(
                         "n_folds": 1,
                         "n_features": int(n_features),
                     }
-
-                    if model == "tabpfn" and n_ctx > n_ctx_limit:
-                        write_jsonl(jsonl_path, [{
-                            "skipped": True, "reason": f"n_ctx > {n_ctx_limit}",
-                            **base_rec,
-                        }], append=True)
-                        continue
 
                     try:
                         if model == "mlr":
@@ -239,7 +253,7 @@ def _run_loo(
     modes: list[str],
     seeds: list[int],
     models: list[str],
-    n_ctx_limit: int,
+    jitter_sigma: float | None = None,
 ) -> None:
     for seed in seeds:
         set_seed(seed)
@@ -261,13 +275,6 @@ def _run_loo(
                         "n_features": int(n_features),
                     }
 
-                    if model == "tabpfn" and n_ctx > n_ctx_limit:
-                        write_jsonl(jsonl_path, [{
-                            "skipped": True, "reason": f"n_ctx > {n_ctx_limit}",
-                            **base_rec,
-                        }], append=True)
-                        continue
-
                     y_true_all = np.empty(n, dtype=np.float64)
                     y_pred_all = np.empty(n, dtype=np.float64)
                     fit_sec_total = 0.0
@@ -280,6 +287,7 @@ def _run_loo(
                         ))
                         X_ctx, y_ctx = duplicate_context(
                             X[mask], y[mask], k, mode, rng,
+                            jitter_sigma=jitter_sigma,
                         )
                         try:
                             if model == "mlr":
@@ -342,10 +350,20 @@ def run_row_probe(
     seeds: list[int],
     include_tabpfn: bool = True,
     split_mode: str = "proportional",
+    test_size: float | None = None,
+    jitter_sigma: float | None = None,
 ) -> None:
     """
     Run all (model, k, mode, seed) combos. Writes `metrics.jsonl` + one
     `predictions_<combo>.csv` per non-skipped combo into `row_dir`.
+
+    ARGS:
+      test_size: fraction of rows held out as the query set in
+        `split_mode="proportional"`. None → use the per-dataset default from
+        CONFIG (usually 0.2). Ignored when `split_mode="loo"`.
+      jitter_sigma: Gaussian std used by `mode="jitter"`. None → use
+        CONFIG["row_probe"]["jitter_sigma"] (usually 1e-6). 0 makes jitter
+        numerically identical to exact.
 
     Existing files are APPENDED/overwritten in place; the caller (CLI) is
     responsible for clearing the dir ahead of time to enforce --fresh.
@@ -354,17 +372,30 @@ def run_row_probe(
         raise ValueError(
             f"split_mode must be one of {VALID_SPLIT_MODES}, got {split_mode!r}"
         )
+    if test_size is not None and not (0.0 < test_size < 1.0):
+        raise ValueError(
+            f"test_size must be in (0, 1), got {test_size!r}"
+        )
+    if jitter_sigma is not None and jitter_sigma < 0:
+        raise ValueError(
+            f"jitter_sigma must be >= 0, got {jitter_sigma!r}"
+        )
     row_dir = ensure_dir(row_dir)
     jsonl_path = row_dir / "metrics.jsonl"
 
-    n_ctx_limit = CONFIG["tabpfn"]["context_limit_n"]
     models = ["mlr"] + (["tabpfn"] if include_tabpfn else [])
 
     if split_mode == "proportional":
         _run_proportional(
-            dataset, row_dir, jsonl_path, k_list, modes, seeds, models, n_ctx_limit,
+            dataset, row_dir, jsonl_path, k_list, modes, seeds, models,
+            test_size=test_size, jitter_sigma=jitter_sigma,
         )
     else:
+        if test_size is not None:
+            logger.info(
+                "test_size=%s ignored in split_mode='loo'", test_size,
+            )
         _run_loo(
-            dataset, row_dir, jsonl_path, k_list, modes, seeds, models, n_ctx_limit,
+            dataset, row_dir, jsonl_path, k_list, modes, seeds, models,
+            jitter_sigma=jitter_sigma,
         )
