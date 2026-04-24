@@ -67,15 +67,21 @@ def duplicate_context(
     mode: str,
     rng: np.random.Generator,
     jitter_sigma: float | None = None,
+    is_nominal: list[bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Tile (X, y) k-fold. In "jitter" mode, add N(0, sigma) noise to every
-    duplicated X cell.
+    duplicated X cell — **except** columns flagged nominal via `is_nominal`,
+    which pass through untouched. A nominal column's integer codes would be
+    corrupted by any float noise; it would not represent the same category.
 
     ARGS:
       jitter_sigma: if None, read CONFIG["row_probe"]["jitter_sigma"]
         (usually 1e-6). Explicit values override the config; 0.0 makes
         "jitter" numerically identical to "exact".
+      is_nominal: optional list[bool] of length X.shape[1]. When provided,
+        noise is zeroed on columns where is_nominal[j] is True. When None,
+        all columns receive noise (legacy behaviour).
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
@@ -89,8 +95,43 @@ def duplicate_context(
         if sigma < 0:
             raise ValueError(f"jitter_sigma must be >= 0, got {sigma}")
         if sigma > 0:
-            X_rep = X_rep + rng.standard_normal(X_rep.shape) * sigma
-    return X_rep.astype(np.float64, copy=False), y_rep.astype(np.float64, copy=False)
+            if is_nominal is not None:
+                nominal_mask = np.asarray(is_nominal, dtype=bool)
+                if nominal_mask.shape[0] != X_rep.shape[1]:
+                    raise ValueError(
+                        f"is_nominal length {nominal_mask.shape[0]} != "
+                        f"X.shape[1] {X_rep.shape[1]}"
+                    )
+            else:
+                nominal_mask = None
+
+            if X_rep.dtype == object:
+                # Per-column path: leave nominal/text columns exactly as-is,
+                # add N(0, sigma) noise to numeric columns only.
+                for j in range(X_rep.shape[1]):
+                    if nominal_mask is not None and nominal_mask[j]:
+                        continue
+                    col = X_rep[:, j]
+                    # Skip columns that aren't numeric (safety: an undeclared
+                    # text column would break the float cast).
+                    if any(isinstance(v, str) for v in col):
+                        continue
+                    float_col = np.array(col, dtype=np.float64)
+                    float_col += rng.standard_normal(float_col.shape[0]) * sigma
+                    X_rep[:, j] = float_col
+            else:
+                noise = rng.standard_normal(X_rep.shape) * sigma
+                if nominal_mask is not None:
+                    # Suppress noise on nominal columns so integer codes stay
+                    # integer-valued (preserves the category semantics).
+                    noise[:, nominal_mask] = 0.0
+                X_rep = X_rep + noise
+    y_out = y_rep.astype(np.float64, copy=False)
+    # Keep object dtype when present (caller decides how to use it); cast
+    # numeric case to float64 for downstream math.
+    if X_rep.dtype == object:
+        return X_rep, y_out
+    return X_rep.astype(np.float64, copy=False), y_out
 
 
 def _metric_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -122,11 +163,13 @@ def _fit_predict_mlr(X_ctx, y_ctx, X_te, is_nominal):
     return y_pred, fit_sec, predict_sec
 
 
-def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed):
+def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed, *, accept_text: bool = True):
     from src.models.tabpfn_wrapper import TabPFNWithColAttn  # noqa: PLC0415
 
     t0 = time.perf_counter()
-    m = TabPFNWithColAttn(device=get_device(), seed=seed).fit(X_ctx, y_ctx)
+    m = TabPFNWithColAttn(
+        device=get_device(), seed=seed, accept_text=accept_text,
+    ).fit(X_ctx, y_ctx)
     fit_sec = time.perf_counter() - t0
     t0 = time.perf_counter()
     y_pred = m.predict(X_te)
@@ -162,6 +205,7 @@ def _run_proportional(
     models: list[str],
     test_size: float | None = None,
     jitter_sigma: float | None = None,
+    tabpfn_numeric: bool = False,
 ) -> None:
     effective_test_size = (
         test_size if test_size is not None
@@ -184,7 +228,9 @@ def _run_proportional(
                     entropy=[seed, k, 0 if mode == "exact" else 1],
                 ))
                 X_ctx, y_ctx = duplicate_context(
-                    X_tr, y_tr, k, mode, rng, jitter_sigma=jitter_sigma,
+                    X_tr, y_tr, k, mode, rng,
+                    jitter_sigma=jitter_sigma,
+                    is_nominal=is_nominal,
                 )
 
                 for model in models:
@@ -209,6 +255,7 @@ def _run_proportional(
                         else:
                             y_pred, fit_sec, predict_sec = _fit_predict_tabpfn(
                                 X_ctx, y_ctx, X_te, seed,
+                                accept_text=not tabpfn_numeric,
                             )
                     except Exception as e:  # noqa: BLE001
                         write_jsonl(jsonl_path, [{
@@ -254,6 +301,7 @@ def _run_loo(
     seeds: list[int],
     models: list[str],
     jitter_sigma: float | None = None,
+    tabpfn_numeric: bool = False,
 ) -> None:
     for seed in seeds:
         set_seed(seed)
@@ -288,6 +336,7 @@ def _run_loo(
                         X_ctx, y_ctx = duplicate_context(
                             X[mask], y[mask], k, mode, rng,
                             jitter_sigma=jitter_sigma,
+                            is_nominal=is_nominal,
                         )
                         try:
                             if model == "mlr":
@@ -297,6 +346,7 @@ def _run_loo(
                             else:
                                 y_pred, fs, ps = _fit_predict_tabpfn(
                                     X_ctx, y_ctx, X[i : i + 1], seed,
+                                    accept_text=not tabpfn_numeric,
                                 )
                         except Exception as e:  # noqa: BLE001
                             failed = e
@@ -352,6 +402,7 @@ def run_row_probe(
     split_mode: str = "proportional",
     test_size: float | None = None,
     jitter_sigma: float | None = None,
+    tabpfn_numeric: bool = False,
 ) -> None:
     """
     Run all (model, k, mode, seed) combos. Writes `metrics.jsonl` + one
@@ -389,6 +440,7 @@ def run_row_probe(
         _run_proportional(
             dataset, row_dir, jsonl_path, k_list, modes, seeds, models,
             test_size=test_size, jitter_sigma=jitter_sigma,
+            tabpfn_numeric=tabpfn_numeric,
         )
     else:
         if test_size is not None:
@@ -398,4 +450,5 @@ def run_row_probe(
         _run_loo(
             dataset, row_dir, jsonl_path, k_list, modes, seeds, models,
             jitter_sigma=jitter_sigma,
+            tabpfn_numeric=tabpfn_numeric,
         )

@@ -41,7 +41,10 @@ datasets/
   "n_features":       10,
   "seed":             0,
   "exported_at":      "2026-04-24",
-  "sha256":           "ab12...89cd"
+  "sha256":           "ab12...89cd",
+  "categorical_mappings": {
+    "region": ["alpha", "beta", "gamma"]
+  }
 }
 ```
 
@@ -49,6 +52,10 @@ datasets/
 - `generator_params`:合成数据集填入 `make_regression` 参数,其他填 `null`
 - `seed`:生成/子采样时使用的 seed(OpenML 的子采样也依赖这个)
 - `sha256`:对 `data.csv` 整个文件取的十六进制摘要,用于验证未被篡改
+- `categorical_mappings`:如果 `infer_meta.py` 做过字符串列因子化,这里保存
+  `column → [原始类别字符串]` 的对照表(列表索引即整数 code)。字段为 `{}`
+  表示本次没做因子化。写原始 CSV 前 `infer_meta.py` 会**默认备份**为
+  `data.csv.orig`,除非传 `--no-backup`
 
 ## 如何导出内置数据集到本目录
 

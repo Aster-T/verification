@@ -1,19 +1,25 @@
 """Infer `meta.json` from a `data.csv`.
 
 Use this when you drop a user-supplied CSV into `datasets/<name>/data.csv`
-and want the sibling meta.json generated automatically (rather than writing
-it by hand).
+and want the sibling meta.json generated automatically.
+
+Non-destructive by design: **data.csv is never modified**. Text columns
+stay as text on disk; downstream loaders (src/data/loaders.py) factorize
+them into integer codes at load time, consulting
+`meta.json['categorical_mappings']` for a stable category→code mapping.
 
 Conventions (see datasets/README.md):
   - last column is the regression target (override with --target-col)
-  - non-numeric feature columns are factorized to int in-place; NaN preserved
   - target must be numeric (this repo is regression-only)
+  - any column with string/object/bool/category dtype is marked nominal
+  - integer columns that are actually categorical can be forced via
+    --nominal <name1,name2>
 
 Examples:
   python scripts/infer_meta.py datasets/my_ds/data.csv
   python scripts/infer_meta.py datasets/my_ds/data.csv --target-col price
-  python scripts/infer_meta.py datasets/my_ds/data.csv --source "Kaggle ABC" --nominal day_of_week,region
-  python scripts/infer_meta.py datasets/my_ds/data.csv --no-factorize
+  python scripts/infer_meta.py datasets/my_ds/data.csv --source "Kaggle ABC" \\
+      --nominal day_of_week,region
 """
 
 from __future__ import annotations
@@ -53,12 +59,16 @@ def _is_text_dtype(s: pd.Series) -> bool:
     )
 
 
-def _factorize_column(s: pd.Series) -> pd.Series:
-    """Integer-encode a nominal column; preserve NaN (codes < 0 -> NaN)."""
-    codes, _ = pd.factorize(s, sort=True)
-    col = codes.astype(np.float64)
-    col[codes < 0] = np.nan
-    return pd.Series(col, index=s.index, name=s.name)
+def _categorical_mapping(s: pd.Series) -> list[str]:
+    """Compute the stable category list for a nominal column.
+
+    Returns `categories` such that `categories[i]` is the string form of the
+    value that should map to integer code i at load time (pd.factorize with
+    sort=True ordering). NaN cells are excluded from the list and get code
+    -1 (represented as NaN downstream).
+    """
+    _codes, uniques = pd.factorize(s, sort=True)
+    return [str(u) for u in uniques.tolist()]
 
 
 def infer_meta(
@@ -66,11 +76,18 @@ def infer_meta(
     target_col: str | None = None,
     source: str = "user_supplied",
     extra_nominal: set[str] | None = None,
-    factorize_text: bool = True,
     seed: int | None = None,
 ) -> dict:
-    """Read `csv_path`, possibly rewrite it (factorization), and return the
-    meta dict. Caller is responsible for writing meta.json itself.
+    """Read `csv_path` (read-only) and return a meta dict describing it.
+
+    Never modifies the CSV. For nominal columns the category→code mapping
+    is recorded under `meta['categorical_mappings']` so that downstream
+    loaders can apply a stable factorization at load time without requiring
+    the CSV itself to be numeric.
+
+    A column is treated as nominal if its pandas dtype is non-numeric
+    (string/object/bool/category) OR if its name is in `extra_nominal`
+    (useful for integer-coded categoricals like "day_of_week").
     """
     csv_path = Path(csv_path)
     df = pd.read_csv(csv_path)
@@ -103,28 +120,23 @@ def infer_meta(
         )
 
     is_nominal: list[bool] = []
-    rewrote = False
+    categorical_mappings: dict[str, list[str]] = {}
     for c in feature_cols:
         text_like = _is_text_dtype(df[c])
-        nominal = text_like or (c in extra_nominal)
-        if text_like:
-            if factorize_text:
-                df[c] = _factorize_column(df[c])
-                rewrote = True
-                logging.warning(
-                    "factorized non-numeric column %r (dtype was %s)",
-                    c, df[c].dtype,
-                )
-            else:
-                raise ValueError(
-                    f"column {c!r} is non-numeric (dtype={df[c].dtype}); "
-                    f"pass --factorize (default) or pre-encode it yourself"
-                )
+        forced = c in extra_nominal
+        nominal = text_like or forced
         is_nominal.append(bool(nominal))
-
-    if rewrote:
-        df.to_csv(csv_path, index=False)
-        logging.warning("rewrote %s with factorized columns", csv_path)
+        # Record the mapping for any nominal column so loaders can encode
+        # consistently across runs. Text columns always record; forced
+        # integer-nominal columns also record (same pd.factorize semantics).
+        if nominal:
+            cats = _categorical_mapping(df[c])
+            categorical_mappings[c] = cats
+            if text_like:
+                logging.info(
+                    "text column %r: recorded %d categories (CSV unchanged)",
+                    c, len(cats),
+                )
 
     meta = {
         "name": csv_path.parent.name,
@@ -138,6 +150,10 @@ def infer_meta(
         "seed": int(seed) if seed is not None else None,
         "exported_at": dt.date.today().isoformat(),
         "sha256": _sha256_file(csv_path),
+        # categories[i] is the string form of the value that maps to code i
+        # at load time (see src/data/loaders.py::_load_local_csv).
+        # NaN cells stay NaN (code -1 is re-mapped to NaN).
+        "categorical_mappings": categorical_mappings,
     }
     return meta
 
@@ -152,9 +168,6 @@ def main() -> None:
     p.add_argument("--nominal", default="",
                    help="comma-separated feature names to force-mark as nominal "
                         "(numeric-but-categorical columns)")
-    p.add_argument("--no-factorize", dest="factorize", action="store_false",
-                   help="error on non-numeric feature columns instead of "
-                        "factorizing them in place")
     p.add_argument("--seed", type=int, default=None,
                    help="seed used to derive this CSV, if any (default: null)")
     p.add_argument("--overwrite", action="store_true",
@@ -181,7 +194,6 @@ def main() -> None:
         target_col=args.target_col,
         source=args.source,
         extra_nominal=extra_nominal,
-        factorize_text=args.factorize,
         seed=args.seed,
     )
     dump_json(meta_path, meta)

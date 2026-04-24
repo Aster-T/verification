@@ -193,10 +193,19 @@ def capture_column_attention(tabpfn_inner_model):
             mod.forward = orig
 
 
-def _build_inference_config_overrides() -> dict:
+def _build_inference_config_overrides(categorical_name: str = "none") -> dict:
     """
     Build an inference_config dict that keeps feature count and order identical
-    between input X and the attention matrix. See module docstring for the rationale.
+    between input X and the attention matrix. See module docstring for the
+    rationale.
+
+    ARGS:
+      categorical_name: forwarded into the PreprocessorConfig. Use "none"
+        (the default, required for the column-probe attention alignment) when
+        X is all numeric. Use e.g. "ordinal_very_common_categories_shuffled"
+        when X carries real string columns so TabPFN's internal categorical
+        handler can encode them; this preserves feature COUNT but may reorder
+        categories internally, which is fine for row-probe purposes.
     """
     from tabpfn.preprocessing.configs import PreprocessorConfig
 
@@ -207,7 +216,7 @@ def _build_inference_config_overrides() -> dict:
         "PREPROCESS_TRANSFORMS": [
             PreprocessorConfig(
                 name="none",
-                categorical_name="none",
+                categorical_name=categorical_name,
                 append_original=False,
                 global_transformer_name=None,
             )
@@ -218,52 +227,104 @@ def _build_inference_config_overrides() -> dict:
 
 
 class TabPFNWithColAttn:
-    def __init__(self, device: str = "cuda", seed: int = 0) -> None:
+    def __init__(
+        self,
+        device: str = "cuda",
+        seed: int = 0,
+        accept_text: bool = True,
+    ) -> None:
         """
         ARGS:
           device: "cuda" or "cpu". If "cuda" is requested and unavailable,
             silently falls back to "cpu".
           seed: passed to TabPFNRegressor's random_state.
+          accept_text: when True (default), X may carry raw strings in
+            categorical columns; the wrapper wraps X into a pandas DataFrame
+            (numeric columns stay numeric, others kept as object) and uses a
+            categorical-aware PreprocessorConfig so TabPFN handles them
+            internally. When False, the caller is expected to pass a numeric
+            X (this is the mode used by column_probe where feature-axis
+            alignment with MLR is critical, and also reachable via
+            `--tabpfn-numeric` on run_row_probe.py).
         """
         if device == "cuda" and not torch.cuda.is_available():
             logger.warning("cuda requested but unavailable; falling back to cpu.")
             device = "cpu"
         self.device = device
         self.seed = seed
+        self.accept_text = accept_text
         self._regressor = None
         self._inner_model = None
         self._last_attn: list[tuple[int, torch.Tensor]] | None = None
         self._n_features: int | None = None
+        self._feature_has_text: list[bool] | None = None
 
-    def _build_regressor(self):
+    def _build_regressor(self, *, any_text: bool):
         # Import lazily so importing this module doesn't require tabpfn at top level.
         from tabpfn import TabPFNRegressor
 
+        cat_name = (
+            "ordinal_very_common_categories_shuffled"
+            if (self.accept_text and any_text)
+            else "none"
+        )
         return TabPFNRegressor(
             n_estimators=1,
             device=self.device,
             random_state=self.seed,
             ignore_pretraining_limits=True,
-            inference_config=_build_inference_config_overrides(),
+            inference_config=_build_inference_config_overrides(cat_name),
         )
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "TabPFNWithColAttn":
-        X = np.asarray(X)
-        y = np.asarray(y, dtype=np.float64).ravel()
-        self._n_features = X.shape[1]
+    @staticmethod
+    def _prep_X(X, feature_has_text: list[bool] | None):
+        """Wrap an object ndarray as a pandas DataFrame with numeric columns
+        kept numeric and text columns kept object, so TabPFN sees each column
+        under its true dtype. Numeric ndarrays pass through unchanged."""
+        X_arr = np.asarray(X)
+        if X_arr.dtype != object:
+            return X_arr
+        import pandas as pd  # noqa: PLC0415  (lazy)
+        df = pd.DataFrame(X_arr).copy()
+        for j in range(df.shape[1]):
+            col = df.iloc[:, j]
+            if feature_has_text is not None:
+                is_text = feature_has_text[j]
+            else:
+                is_text = any(isinstance(v, str) for v in col)
+            if not is_text:
+                df.iloc[:, j] = pd.to_numeric(col, errors="coerce")
+        return df
 
-        self._regressor = self._build_regressor()
-        self._regressor.fit(X, y)
-        # After fit, models_ is populated. n_estimators=1 → one model.
+    def fit(self, X, y) -> "TabPFNWithColAttn":
+        X_raw = np.asarray(X)
+        y = np.asarray(y, dtype=np.float64).ravel()
+        self._n_features = X_raw.shape[1]
+
+        # Detect which columns hold strings so predict() later uses the same
+        # typing; cached so we don't re-scan every predict.
+        if X_raw.dtype == object and self.accept_text:
+            self._feature_has_text = [
+                any(isinstance(v, str) for v in X_raw[:, j])
+                for j in range(self._n_features)
+            ]
+            any_text = any(self._feature_has_text)
+        else:
+            self._feature_has_text = None
+            any_text = False
+
+        X_prepped = self._prep_X(X_raw, self._feature_has_text)
+        self._regressor = self._build_regressor(any_text=any_text)
+        self._regressor.fit(X_prepped, y)
         self._inner_model = self._regressor.models_[0]
         return self
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
+    def predict(self, X) -> np.ndarray:
         if self._regressor is None:
             raise RuntimeError("predict called before fit.")
-        X = np.asarray(X)
+        X_prepped = self._prep_X(X, self._feature_has_text)
         with capture_column_attention(self._inner_model) as captured:
-            y_pred = self._regressor.predict(X)
+            y_pred = self._regressor.predict(X_prepped)
         self._last_attn = list(captured)
         return np.asarray(y_pred, dtype=np.float64).ravel()
 

@@ -94,6 +94,13 @@ def main() -> None:
     p.add_argument(
         "--no-tabpfn", action="store_true", help="Skip TabPFN branch (MLR only)."
     )
+    p.add_argument(
+        "--tabpfn-numeric", action="store_true",
+        help="Pass numeric (per-column factorized) X to TabPFN instead of "
+             "raw strings. Default: TabPFN receives the original text "
+             "columns and uses its internal categorical handler. MLR is "
+             "unaffected (it always factorizes internally).",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -134,6 +141,7 @@ def main() -> None:
             split_mode=args.split_mode,
             test_size=args.test_size,
             jitter_sigma=args.jitter_sigma,
+            tabpfn_numeric=args.tabpfn_numeric,
         )
 
 

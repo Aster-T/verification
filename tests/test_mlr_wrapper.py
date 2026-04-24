@@ -79,3 +79,55 @@ def test_nominal_skips_standardization():
     # Continuous column was standardized.
     assert m.mu_[1] != 0.0
     assert m.sd_[1] != 1.0
+
+
+def test_fit_with_string_column_auto_factorizes():
+    """MLR receives an object ndarray with a string column; it factorizes
+    internally, marks that column nominal, and trains / predicts cleanly."""
+    rng = np.random.default_rng(2)
+    n = 150
+    text_col = rng.choice(["red", "green", "blue"], size=n)
+    num_col = rng.standard_normal(n) * 5.0 + 2.0
+    # Encode hidden "true" effect of category to verify the factorization
+    # preserves learnability.
+    hidden = np.where(text_col == "red", 1.0,
+             np.where(text_col == "green", 2.0, 3.0))
+    y = 0.4 * num_col + hidden + rng.standard_normal(n) * 0.05
+
+    X = np.empty((n, 2), dtype=object)
+    X[:, 0] = text_col
+    X[:, 1] = num_col
+
+    m = MLRWithW().fit(X, y, feature_names=["color", "num"])
+    # Column 0 was auto-detected as text → factorized → marked nominal.
+    assert m.is_nominal_[0]
+    assert m.is_nominal_[1] is np.False_ or m.is_nominal_[1] == False  # noqa: E712
+    assert m._cat_mappings_ == {0: ["blue", "green", "red"]}
+    # Predict on unseen rows (same categories) — should fit reasonably.
+    y_pred = m.predict(X)
+    assert y_pred.shape == (n,)
+    # Since the relationship is clean, R² should be high.
+    r2 = 1 - ((y - y_pred) ** 2).sum() / ((y - y.mean()) ** 2).sum()
+    assert r2 > 0.95, r2
+
+
+def test_predict_with_unseen_category_becomes_nan_then_imputed():
+    """A test-time category not present at fit time becomes NaN via the
+    stored mapping, then gets filled by the built-in SimpleImputer."""
+    rng = np.random.default_rng(3)
+    n = 100
+    text_col = rng.choice(["A", "B"], size=n)
+    num_col = rng.standard_normal(n)
+    y = np.where(text_col == "A", 1.0, -1.0) + 0.1 * num_col
+
+    X_train = np.empty((n, 2), dtype=object)
+    X_train[:, 0] = text_col; X_train[:, 1] = num_col
+
+    m = MLRWithW().fit(X_train, y)
+    # Predict with a brand-new category "C" — should not raise.
+    X_test = np.empty((3, 2), dtype=object)
+    X_test[:, 0] = ["A", "B", "C"]  # "C" is unseen
+    X_test[:, 1] = [0.0, 0.0, 0.0]
+    y_pred = m.predict(X_test)
+    assert y_pred.shape == (3,)
+    assert np.all(np.isfinite(y_pred))

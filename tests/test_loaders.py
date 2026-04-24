@@ -56,6 +56,57 @@ def test_load_dataset_full_matches_split_concat():
     assert nom_full == nom
 
 
+def test_local_csv_preserves_text_columns():
+    """Local CSV with a string column: loader returns X as object dtype
+    with the original strings intact. Numeric columns stay numeric inside
+    the same object ndarray. data.csv itself is not modified."""
+    from src.configs import CONFIG
+
+    repo = Path(__file__).resolve().parent.parent
+    name = "_test_local_csv_text"
+    ds_dir = repo / "datasets" / name
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = ds_dir / "data.csv"
+    meta_path = ds_dir / "meta.json"
+
+    rows = [["red", 1.0, 10.0], ["blue", 2.0, 20.0], ["red", 3.0, 30.0]]
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["color", "x1", "y"])
+        w.writerows(rows)
+
+    meta_path.write_text(json.dumps({
+        "name": name, "source": "user_supplied",
+        "target_col": "y",
+        "feature_names": ["color", "x1"],
+        "is_nominal": [True, False],
+        "n_rows": 3, "n_features": 2,
+        "categorical_mappings": {"color": ["blue", "red"]},
+    }), encoding="utf-8")
+
+    try:
+        original_bytes = csv_path.read_bytes()
+        X, y_arr, feature_names, is_nominal = load_dataset_full(name, seed=0)
+        # Object dtype because there's a text column
+        assert X.dtype == object
+        # Text column preserved as strings
+        assert list(X[:, 0]) == ["red", "blue", "red"]
+        # Numeric column still numeric (within the object array)
+        np.testing.assert_array_equal(
+            np.array(X[:, 1], dtype=np.float64), [1.0, 2.0, 3.0]
+        )
+        assert is_nominal == [True, False]
+        # data.csv unchanged
+        assert csv_path.read_bytes() == original_bytes
+    finally:
+        CONFIG["datasets"].pop(name, None)
+        for p in (csv_path, meta_path):
+            if p.exists():
+                p.unlink()
+        if ds_dir.exists():
+            ds_dir.rmdir()
+
+
 def test_local_csv_auto_discovery():
     """Drop data.csv + meta.json under datasets/<name>/, then call
     load_dataset_full(name) — configs.get_dataset_cfg should register the

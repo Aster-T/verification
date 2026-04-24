@@ -107,6 +107,13 @@ def _load_local_csv(cfg: dict):
     Load a user-supplied dataset from `datasets/<name>/{data.csv, meta.json}`.
     Registered automatically by src.configs._register_local_csv_if_present
     whenever get_dataset_cfg(name) sees a name with matching files on disk.
+
+    Return type:
+      - If every feature column is numeric: X is float64 ndarray (shape (n, f)).
+      - If any feature column is text (object/str dtype): X is an object
+        ndarray with the original strings preserved in those columns.
+        Downstream model wrappers (MLRWithW, TabPFNWithColAttn) decide how to
+        turn text into numbers — see their `fit()` implementations.
     """
     path = Path(cfg["path"])
     meta_path = path / "meta.json"
@@ -128,7 +135,21 @@ def _load_local_csv(cfg: dict):
             f"Re-run scripts/infer_meta.py to regenerate meta.json."
         )
     y = df[target_col].to_numpy(dtype=np.float64)
-    X = df[feature_names].to_numpy(dtype=np.float64)
+
+    has_text = any(
+        not pd.api.types.is_numeric_dtype(df[c]) for c in feature_names
+    )
+    if has_text:
+        # Object ndarray preserving strings where the column is non-numeric.
+        X = np.empty((len(df), len(feature_names)), dtype=object)
+        for j, col_name in enumerate(feature_names):
+            col = df[col_name]
+            if pd.api.types.is_numeric_dtype(col):
+                X[:, j] = col.to_numpy(dtype=np.float64)
+            else:
+                X[:, j] = col.astype(object).to_numpy()
+    else:
+        X = df[feature_names].to_numpy(dtype=np.float64)
     return X, y, feature_names, is_nominal
 
 

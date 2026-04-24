@@ -232,3 +232,54 @@ def test_jitter_sigma_negative_raises(tmp_path):
             k_list=[1], modes=["exact"], seeds=[0],
             include_tabpfn=False, jitter_sigma=-1.0,
         )
+
+
+def test_jitter_skips_nominal_columns():
+    """duplicate_context with is_nominal respects the mask: nominal columns
+    pass through untouched, numeric columns receive N(0, sigma) noise."""
+    rng = np.random.default_rng(0)
+    X = np.array(
+        [[10.0, 0.0, 10.0],
+         [20.0, 1.0, 20.0],
+         [30.0, 2.0, 30.0]],
+        dtype=np.float64,
+    )
+    y = np.array([1.0, 2.0, 3.0])
+    is_nominal = [False, True, False]  # col 1 is nominal
+    X_rep, _ = duplicate_context(
+        X, y, k=2, mode="jitter", rng=rng,
+        jitter_sigma=1.0,  # huge noise so any leakage is obvious
+        is_nominal=is_nominal,
+    )
+    # Column 1 must be EXACTLY unchanged (tiled raw) — no float contamination.
+    expected_col1 = np.tile(X[:, 1], 2)
+    np.testing.assert_array_equal(X_rep[:, 1], expected_col1)
+    # Columns 0 and 2 should have moved (noise was applied).
+    assert not np.allclose(X_rep[:, 0], np.tile(X[:, 0], 2))
+    assert not np.allclose(X_rep[:, 2], np.tile(X[:, 2], 2))
+
+
+def test_jitter_without_is_nominal_applies_to_all_cols():
+    """Legacy path: if is_nominal is None, every column receives noise."""
+    rng = np.random.default_rng(0)
+    X = np.array([[10.0, 0.0], [20.0, 1.0]])
+    y = np.array([1.0, 2.0])
+    X_rep, _ = duplicate_context(
+        X, y, k=2, mode="jitter", rng=rng,
+        jitter_sigma=1.0,
+        is_nominal=None,
+    )
+    assert not np.allclose(X_rep[:, 0], np.tile(X[:, 0], 2))
+    assert not np.allclose(X_rep[:, 1], np.tile(X[:, 1], 2))
+
+
+def test_jitter_is_nominal_length_mismatch_raises():
+    rng = np.random.default_rng(0)
+    X = np.array([[1.0, 2.0, 3.0]])
+    y = np.array([0.0])
+    with pytest.raises(ValueError, match="is_nominal length"):
+        duplicate_context(
+            X, y, k=1, mode="jitter", rng=rng,
+            jitter_sigma=1.0,
+            is_nominal=[False, True],  # wrong length (2 != 3)
+        )
