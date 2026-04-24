@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# datasets/ — materialized data is regenerable; commit only meta.json + README
+datasets/*
+!datasets/README.md
+!datasets/openml.json
+
+# Claude
+.claude/

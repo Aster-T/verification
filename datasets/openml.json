@@ -1,0 +1,23 @@
+{
+  "_comment": "OpenML dataset presets. Key = registration name (used in --dataset / results/<name>/). Keys starting with '_' are ignored. Run: python scripts/export_datasets.py --openml-all  (or --openml-preset <key>).",
+  "forest-fires": {
+    "id": 44962,
+    "subsample": null,
+    "description": "The aim of this datasets is to predict the burned area of forest fires."
+  },
+  "airfoil-self-noise": {
+    "id": 44957,
+    "subsample": null,
+    "description": "NASA data set, obtained from a series of aerodynamic and acoustic tests of two and three-dimensional airfoil blade sections conducted in an anechoic wind tunnel."
+  },
+  "auction-verification":{
+    "id":44958,
+    "subsample": null,
+    "description":"This dataset was created to verify properties of an Simultaneous Multi-Round (SMR) auction model. The creators of the dataset use BPMN to model the design of the German 4G spectrum auction to sell 800 MHz band. The auction has four bidders and six products. A random budget is assigned from the range [1, 100] to each bidder for each product. A reserve price of 3 is also defined for all products. Further, each bidder has an individual capacity."
+  },
+  "concrete-compressive-strength":{
+    "id":44959,
+    "subsample": null,
+    "description":"Concrete is the most important material in civil engineering. The concrete compressive strength is a highly nonlinear function of age and ingredients. Each instance represents a description, different features of concrete instance, including its compressive strength. The latter can be predicted using the other features about the concrete."
+  }
+}
