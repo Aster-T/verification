@@ -219,3 +219,7 @@ third_party/
 
 # results
 results/
+
+# scripts
+*.bat
+*.sh
