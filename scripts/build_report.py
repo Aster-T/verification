@@ -11,7 +11,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 
-from src.configs import add_openml_cli_args, resolve_openml_args  # noqa: E402
+from src.configs import add_openml_cli_args, resolve_openml_args, sigma_tag  # noqa: E402
 from src.viz.curves import plot_row_curves  # noqa: E402
 from src.viz.heatmap import plot_column_heatmaps  # noqa: E402
 from src.viz.report import build_report  # noqa: E402
@@ -48,7 +48,7 @@ def main() -> None:
     results_root = Path(args.results_root)
     out_html = Path(args.out)
     if args.jitter_sigma is not None:
-        results_root = results_root / f"sigma_{args.jitter_sigma}"
+        results_root = results_root / f"sigma_{sigma_tag(args.jitter_sigma)}"
         # If --out was left at the default, rehome it under the sigma subtree
         # so the HTML ends up next to the artefacts it references.
         if Path(args.out) == _DEFAULT_OUT_HTML:

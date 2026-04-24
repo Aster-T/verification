@@ -12,7 +12,7 @@ REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "third-party" / "tabpfn" / "src"))
 
-from src.configs import CONFIG, add_openml_cli_args, resolve_openml_args  # noqa: E402
+from src.configs import CONFIG, add_openml_cli_args, resolve_openml_args, sigma_tag  # noqa: E402
 from src.probing.row_probe import VALID_SPLIT_MODES, run_row_probe  # noqa: E402
 
 
@@ -114,7 +114,7 @@ def main() -> None:
     # Otherwise use the plain layout <out>/<dataset>/row/.
     out_root = args.out
     if args.jitter_sigma is not None:
-        out_root = args.out / f"sigma_{args.jitter_sigma}"
+        out_root = args.out / f"sigma_{sigma_tag(args.jitter_sigma)}"
         logging.warning("jitter_sigma=%s -> results under %s",
                         args.jitter_sigma, out_root)
 

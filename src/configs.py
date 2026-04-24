@@ -391,6 +391,32 @@ def parse_openml_spec(spec: str) -> tuple[int, str | None]:
     return int(id_part), name
 
 
+def sigma_tag(sigma: float) -> str:
+    """
+    Format a jitter_sigma float as a short, filesystem-safe tag in consistent
+    scientific notation. Used by CLI scripts to build `sigma_<tag>/` result
+    sub-directories so sweeping multiple sigmas doesn't cause collisions.
+
+    Examples:
+      sigma_tag(1e-2)   -> "1e-2"
+      sigma_tag(1e-6)   -> "1e-6"
+      sigma_tag(2.5e-4) -> "2.5e-4"
+      sigma_tag(5e-2)   -> "5e-2"
+      sigma_tag(0)      -> "0"
+    """
+    if sigma == 0:
+        return "0"
+    # Split via Python's %e formatter so mantissa/exp extraction is robust.
+    mantissa_str, exp_str = f"{sigma:e}".split("e")
+    m = float(mantissa_str)
+    e = int(exp_str)
+    if abs(m - round(m)) < 1e-9:
+        m_out = str(int(round(m)))
+    else:
+        m_out = f"{m:g}".rstrip("0").rstrip(".")
+    return f"{m_out}e{e}"
+
+
 def get_device() -> str:
     """
     Return the tabpfn device from CONFIG, falling back to 'cpu' if cuda is
