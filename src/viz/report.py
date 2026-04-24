@@ -46,44 +46,70 @@ def _img_tag(p: Path) -> str:
 
 
 def _aggregate_row_table(jsonl_path: Path) -> str:
+    """
+    Render a per-(split_mode, model, mode, k) summary table. Columns:
+      split, model, mode, k, n_ctx, n_query, n_features,
+      nRMSE (mean ± std over seeds), R², RMSE, MAE, skipped.
+    """
     records = read_jsonl(jsonl_path) if jsonl_path.exists() else []
     if not records:
         return '<div class="note">No row_probe records to summarize.</div>'
 
-    by_key: dict[tuple, dict[str, list]] = {}
+    by_key: dict[tuple, dict[str, object]] = {}
     for r in records:
-        key = (r["model"], r["mode"], r["k"])
-        row = by_key.setdefault(key, {"r2": [], "rmse": [], "mae": [], "skipped": 0})
+        split = r.get("split_mode", "proportional")
+        key = (split, r["model"], r["mode"], r["k"])
+        row = by_key.setdefault(key, {
+            "nrmse": [], "r2": [], "rmse": [], "mae": [], "skipped": 0,
+            "n_ctx": r.get("n_ctx"),
+            # Accept both new 'n_query' and legacy 'n_te'.
+            "n_query": r.get("n_query", r.get("n_te")),
+            "n_folds": r.get("n_folds", 1),
+            "n_features": r.get("n_features"),
+        })
         if r.get("skipped"):
-            row["skipped"] += 1
+            row["skipped"] += 1  # type: ignore[operator]
         else:
-            row["r2"].append(r["r2"])
-            row["rmse"].append(r["rmse"])
-            row["mae"].append(r["mae"])
+            if r.get("nrmse") is not None:
+                row["nrmse"].append(r["nrmse"])  # type: ignore[union-attr]
+            row["r2"].append(r["r2"])  # type: ignore[union-attr]
+            row["rmse"].append(r["rmse"])  # type: ignore[union-attr]
+            row["mae"].append(r["mae"])  # type: ignore[union-attr]
 
-    def fmt(xs):
+    def fmt(xs: list[float]) -> str:
         if not xs:
             return "-"
         if len(xs) == 1:
             return f"{xs[0]:.4f}"
         return f"{mean(xs):.4f} ± {pstdev(xs):.4f}"
 
+    def fmt_int(v: object) -> str:
+        return str(v) if isinstance(v, int) else "-"
+
     rows = []
-    for key in sorted(by_key.keys(), key=lambda t: (t[0], t[1], t[2])):
-        model, mode, k = key
+    for key in sorted(by_key.keys(), key=lambda t: (t[0], t[1], t[2], t[3])):
+        split, model, mode, k = key
         stats = by_key[key]
-        cls = "skipped" if stats["skipped"] and not stats["r2"] else ""
+        cls = "skipped" if stats["skipped"] and not stats["nrmse"] else ""  # type: ignore[index]
         rows.append(
-            f'<tr class="{cls}"><td class="label">{model}</td>'
+            f'<tr class="{cls}"><td class="label">{split}</td>'
+            f'<td class="label">{model}</td>'
             f'<td class="label">{mode}</td><td>{k}</td>'
-            f'<td>{fmt(stats["r2"])}</td>'
-            f'<td>{fmt(stats["rmse"])}</td>'
-            f'<td>{fmt(stats["mae"])}</td>'
+            f'<td>{fmt_int(stats["n_ctx"])}</td>'
+            f'<td>{fmt_int(stats["n_query"])}</td>'
+            f'<td>{fmt_int(stats["n_folds"])}</td>'
+            f'<td>{fmt_int(stats["n_features"])}</td>'
+            f'<td>{fmt(stats["nrmse"])}</td>'  # type: ignore[arg-type]
+            f'<td>{fmt(stats["r2"])}</td>'     # type: ignore[arg-type]
+            f'<td>{fmt(stats["rmse"])}</td>'   # type: ignore[arg-type]
+            f'<td>{fmt(stats["mae"])}</td>'    # type: ignore[arg-type]
             f'<td>{stats["skipped"] or ""}</td></tr>'
         )
     head = (
-        "<thead><tr><th>model</th><th>mode</th><th>k</th><th>R²</th>"
-        "<th>RMSE</th><th>MAE</th><th>skipped</th></tr></thead>"
+        "<thead><tr><th>split</th><th>model</th><th>mode</th><th>k</th>"
+        "<th>n_ctx</th><th>n_query</th><th>n_folds</th><th>n_features</th>"
+        "<th>nRMSE</th><th>R²</th><th>RMSE</th><th>MAE</th>"
+        "<th>skipped</th></tr></thead>"
     )
     return f'<table>{head}<tbody>{"".join(rows)}</tbody></table>'
 
@@ -100,18 +126,23 @@ def build_report(
     results_root = Path(results_root)
     out_html = Path(out_html)
     out_html.parent.mkdir(parents=True, exist_ok=True)
-    viz_dir = results_root / "viz"
 
     nav = " | ".join(f'<a href="#{ds}">{ds}</a>' for ds in datasets)
     sections = []
     for ds in datasets:
-        side_by_side = viz_dir / f"{ds}_side_by_side.png"
-        per_layer = viz_dir / f"{ds}_tabpfn_per_layer.png"
-        row_curve = viz_dir / f"{ds}_row_curve.png"
-        jsonl_path = results_root / "row" / f"{ds}.jsonl"
+        viz_dir = results_root / ds / "viz"
+        side_by_side = viz_dir / "side_by_side.png"
+        per_layer = viz_dir / "tabpfn_per_layer.png"
+        row_curve = viz_dir / "row_curve.png"
+        row_single = [
+            viz_dir / f"row_curve_{m}_{md}.png"
+            for (m, md) in [("mlr", "exact"), ("mlr", "jitter"),
+                            ("tabpfn", "exact"), ("tabpfn", "jitter")]
+        ]
+        jsonl_path = results_root / ds / "row" / "metrics.jsonl"
 
-        # Detect Phase 2 skip: tabpfn.npz missing for this dataset.
-        tp_path = results_root / "column" / ds / "tabpfn.npz"
+        # Detect TabPFN skip: tabpfn.npz missing for this dataset.
+        tp_path = results_root / ds / "column" / "tabpfn.npz"
         notes = []
         if not tp_path.exists():
             notes.append(
@@ -134,6 +165,10 @@ def build_report(
 
               <h3>行探索 (row probe)</h3>
               {_img_tag(row_curve)}
+              <details>
+                <summary>各 (model, mode) 单独视图(独立 y 轴 scale)</summary>
+                {''.join(_img_tag(p) for p in row_single)}
+              </details>
               {table_html}
             </section>
             """

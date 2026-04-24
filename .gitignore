@@ -213,3 +213,9 @@ datasets/*
 
 # Claude
 .claude/
+
+# Third-party libraries
+third_party/
+
+# results
+results/

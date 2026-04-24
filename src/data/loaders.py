@@ -14,7 +14,9 @@ wrappers) works on plain numpy arrays. Per 00_conventions.md:
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -91,9 +93,42 @@ def load_dataset_full(
     elif loader == "openml_id":
         X, y, feature_names, is_nominal = _load_openml_by_id(cfg, seed)
 
+    elif loader == "local_csv":
+        X, y, feature_names, is_nominal = _load_local_csv(cfg)
+
     else:
         raise ValueError(f"Unknown loader: {loader!r}")
 
+    return X, y, feature_names, is_nominal
+
+
+def _load_local_csv(cfg: dict):
+    """
+    Load a user-supplied dataset from `datasets/<name>/{data.csv, meta.json}`.
+    Registered automatically by src.configs._register_local_csv_if_present
+    whenever get_dataset_cfg(name) sees a name with matching files on disk.
+    """
+    path = Path(cfg["path"])
+    meta_path = path / "meta.json"
+    csv_path = path / "data.csv"
+    if not meta_path.exists() or not csv_path.exists():
+        raise FileNotFoundError(
+            f"local_csv dataset at {path} missing data.csv or meta.json"
+        )
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    target_col = meta["target_col"]
+    feature_names = [str(c) for c in meta["feature_names"]]
+    is_nominal = [bool(v) for v in meta["is_nominal"]]
+
+    df = pd.read_csv(csv_path)
+    missing = [c for c in feature_names + [target_col] if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"{csv_path}: columns {missing} declared in meta.json not found. "
+            f"Re-run scripts/infer_meta.py to regenerate meta.json."
+        )
+    y = df[target_col].to_numpy(dtype=np.float64)
+    X = df[feature_names].to_numpy(dtype=np.float64)
     return X, y, feature_names, is_nominal
 
 

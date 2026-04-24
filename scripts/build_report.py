@@ -36,15 +36,22 @@ def main() -> None:
         p.error("provide at least one of: --dataset / --openml-id / --openml-preset / --openml-all")
 
     results_root = Path(args.results_root)
-    viz_dir = results_root / "viz"
-    viz_dir.mkdir(parents=True, exist_ok=True)
 
     for ds in datasets:
-        try:
-            plot_column_heatmaps(ds, results_root / "column", viz_dir)
-        except Exception as e:  # noqa: BLE001
-            logging.warning("heatmaps failed for %s: %s", ds, e)
-        jsonl = results_root / "row" / f"{ds}.jsonl"
+        ds_root = results_root / ds
+        viz_dir = ds_root / "viz"
+        viz_dir.mkdir(parents=True, exist_ok=True)
+
+        column_dir = ds_root / "column"
+        if (column_dir / "mlr.npz").exists():
+            try:
+                plot_column_heatmaps(ds, column_dir, viz_dir)
+            except Exception as e:  # noqa: BLE001
+                logging.warning("heatmaps failed for %s: %s", ds, e)
+        else:
+            logging.warning("no column/ artefacts for %s; skipping heatmaps", ds)
+
+        jsonl = ds_root / "row" / "metrics.jsonl"
         if jsonl.exists():
             try:
                 plot_row_curves(ds, jsonl, viz_dir)

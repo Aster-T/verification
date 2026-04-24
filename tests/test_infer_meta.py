@@ -21,16 +21,6 @@ _spec.loader.exec_module(_mod)
 infer_meta = _mod.infer_meta
 
 
-@pytest.fixture
-def tmp_path():
-    """Repo-local tmp dir (avoid %LOCALAPPDATA%\\Temp PermissionError on Windows)."""
-    base = REPO / ".pytest_cache" / "tmp"
-    base.mkdir(parents=True, exist_ok=True)
-    d = base / f"infer-{np.random.default_rng().integers(0, 10**9)}"
-    d.mkdir(parents=True, exist_ok=True)
-    yield d
-
-
 def _write_csv(path: Path, rows: list[list], header: list[str]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

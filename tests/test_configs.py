@@ -19,17 +19,6 @@ from src.configs import (
 )
 
 
-@pytest.fixture
-def tmp_path():
-    """Repo-local tmp dir (avoid %LOCALAPPDATA%\\Temp PermissionError on Windows)."""
-    repo = Path(__file__).resolve().parent.parent
-    base = repo / ".pytest_cache" / "tmp"
-    base.mkdir(parents=True, exist_ok=True)
-    d = base / f"cfg-{np.random.default_rng().integers(0, 10**9)}"
-    d.mkdir(parents=True, exist_ok=True)
-    yield d
-
-
 def _write_presets(path: Path, data: dict) -> Path:
     path.write_text(json.dumps(data), encoding="utf-8")
     return path

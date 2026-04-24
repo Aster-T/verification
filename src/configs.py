@@ -110,8 +110,8 @@ CONFIG = {
         "heatmap_cmap": "RdBu_r",
         "figsize_heatmap_single": (6, 5),
         "figsize_heatmap_triptych": (15, 5),
-        "figsize_curve": (8, 5),
-        "dpi": 120,
+        "figsize_curve": (14, 8),
+        "dpi": 150,
     },
 }
 
@@ -120,11 +120,43 @@ CONFIG = {
 # Small helpers (keep them thin; add more only when you find yourself
 # repeating the same lookup in 3+ places).
 # -----------------------------------------------------------------------------
+def _register_local_csv_if_present(name: str) -> bool:
+    """
+    If `datasets/<name>/meta.json` exists on disk, register it in CONFIG as a
+    local_csv dataset and return True. Otherwise return False. Test_size
+    defaults to 0.2; override by putting 'test_size' in meta.json.
+    """
+    ds_dir = REPO_ROOT / "datasets" / name
+    meta_path = ds_dir / "meta.json"
+    if not meta_path.exists():
+        return False
+    if name in CONFIG["datasets"]:
+        return True
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    CONFIG["datasets"][name] = {
+        "loader": "local_csv",
+        "path": str(ds_dir),
+        "test_size": float(meta.get("test_size", 0.2)),
+    }
+    return True
+
+
 def get_dataset_cfg(name: str) -> dict:
-    """Look up a dataset descriptor by name; raise with available list on miss."""
+    """
+    Look up a dataset descriptor by name. On miss, attempt to auto-register a
+    local_csv dataset from `datasets/<name>/`. Raises KeyError with the list
+    of available names if that also fails.
+    """
+    if name not in CONFIG["datasets"]:
+        _register_local_csv_if_present(name)
     if name not in CONFIG["datasets"]:
         raise KeyError(
-            f"Unknown dataset '{name}'. Available: {sorted(CONFIG['datasets'].keys())}"
+            f"Unknown dataset '{name}'. Available: {sorted(CONFIG['datasets'].keys())}. "
+            f"For a local dataset, put data.csv + meta.json under datasets/{name}/ "
+            f"(generate meta.json via scripts/infer_meta.py)."
         )
     return CONFIG["datasets"][name]
 

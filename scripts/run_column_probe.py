@@ -25,7 +25,8 @@ def main() -> None:
         help="Registered dataset name, repeatable. e.g. --dataset diabetes --dataset cali_housing",
     )
     add_openml_cli_args(p)
-    p.add_argument("--out", type=Path, default=REPO / "results" / "column")
+    p.add_argument("--out", type=Path, default=REPO / "results",
+                   help="Results root. Column artefacts go to <out>/<dataset>/column/.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
@@ -40,7 +41,7 @@ def main() -> None:
         p.error("provide at least one of: --dataset / --openml-id / --openml-preset / --openml-all")
 
     for ds in datasets:
-        run_column_probe(ds, args.out, args.seed)
+        run_column_probe(ds, args.out / ds / "column", args.seed)
 
 
 if __name__ == "__main__":

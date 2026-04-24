@@ -1,8 +1,9 @@
 # datasets/
 
 本目录存放项目使用的数据集的**本地快照**,用于离线复现、审查、以及投放自备
-数据。**不是** pipeline 的强制数据源 —— `src/data/loaders.py` 默认仍从
-sklearn / OpenML / `make_regression` 取数,本目录为可选镜像。
+数据。pipeline 既能从 sklearn / OpenML / `make_regression` 取数,也能**直接
+读本目录** —— 只要 `datasets/<name>/meta.json` 存在,
+`load_dataset_full(name, seed)` 会自动按 `loader=local_csv` 注册并加载。
 
 ## 目录结构
 
@@ -89,8 +90,8 @@ python scripts/export_datasets.py --openml-all
 python scripts/export_datasets.py --openml-config path/to/other.json --openml-all
 ```
 
-5 个 CLI(`export_datasets` / `run_column_probe` / `run_row_probe` / `run_loo`
-/ `build_report`)都共享这套 `--openml-*` 参数。
+4 个 CLI(`export_datasets` / `run_column_probe` / `run_row_probe` /
+`build_report`)都共享这套 `--openml-*` 参数。
 
 **subsample 优先级**:preset 条目里的 `subsample` > CLI `--openml-subsample`
 > 默认**不设上限**。CLI 传 `--openml-subsample 0` 或任何非正整数也表示"不限"。
@@ -102,16 +103,19 @@ python scripts/export_datasets.py --openml-config path/to/other.json --openml-al
 ## 如何投放自备数据集
 
 1. `mkdir datasets/<my_dataset>`
-2. 准备 `data.csv`,**最后一列**是回归目标
-3. 手写 `meta.json`(字段同上,`source` 填 `"user_supplied"`,`sha256` 可选)
-4. (可选)如果要让 pipeline 直接用,再在 `src/configs.py` 注册一条
-   `"loader": "local_csv"` 的 entry —— 当前 loaders.py **尚未实现** 这个分支,
-   接入时再加即可
+2. 把 `data.csv` 放进去,**最后一列**是回归目标(或用 `--target-col` 覆盖)
+3. 自动生成 meta.json:`python scripts/infer_meta.py datasets/<my_dataset>/data.csv`
+   (或手写 meta.json,字段同上)
+4. 直接用:任何 `--dataset <my_dataset>` 都会走 `loader=local_csv` 自动注册
+
+`src/configs.py::get_dataset_cfg(name)` 在 CONFIG miss 时会扫 `datasets/<name>/`
+自动注册,不需要手动改 CONFIG。
 
 ## .gitignore 策略
 
-本目录下的 `data.csv` 默认**不进 git**(见 repo 根 `.gitignore`),因为:
-- sklearn / OpenML 数据有各自的 license,未必适合二次分发
-- 合成数据可由 `export_datasets.py` 随时重建
+默认**整个 `datasets/*` 都不进 git**(见 repo 根 `.gitignore`),只有
+`README.md` 和 `openml.json` 两个配置文件被保留。原因:
+- sklearn / OpenML 数据有各自 license,未必适合二次分发
+- 数据可由 `export_datasets.py` + `openml.json` 随时重建
 
-`meta.json` **进 git**,作为"此快照曾存在过"的记录。
+如果有可公开的自备数据,手动 `git add -f datasets/<name>/` 即可破例入库。

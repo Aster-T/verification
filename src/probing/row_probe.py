@@ -1,24 +1,46 @@
 """
-Row probe: measure how R²/RMSE/MAE react as the TabPFN context is duplicated.
+Row probe: measure how nRMSE / R² / RMSE / MAE react as the context is
+duplicated (2x–10x or user-specified).
 
-We split (X, y) once per (dataset, seed), then for each k ∈ k_list and each
-mode ∈ {"exact", "jitter"} build a context by duplicating (X_tr, y_tr) k times.
-TabPFN and MLR are both evaluated on the SAME fixed test set.
+SPLIT MODES:
+  proportional  — one train/test split per seed via load_dataset(name, seed).
+                  Duplicate (X_tr, y_tr) k× → context. Predict fixed X_te.
+  loo           — no split. For each held-out index i: duplicate all other
+                  n-1 rows k× → context, predict row i. Aggregate over all
+                  N left-out points into one record. Intended for small
+                  datasets where a proportional split is wasteful.
 
-For MLR in "exact" mode the R² is mathematically independent of k (OLS on a
-uniformly replicated dataset returns the same coefficients). This is the
-framework-level invariant verified in tests/test_row_probe.py.
+For MLR in "exact" mode the R² (hence nRMSE) is mathematically independent
+of k — OLS on a uniformly replicated dataset returns the same coefficients.
 
-JSONL SCHEMA (fields in this fixed order):
-  dataset, model, k, mode, seed, n_ctx, n_te,
-  r2, rmse, mae, fit_sec, predict_sec
+PRIMARY METRIC: nRMSE = RMSE / std(y_query)
+  - Dimensionless, scale-invariant -> comparable across datasets.
+  - 0 = perfect; 1 ≈ predicting the query mean; >1 = worse than that baseline.
+  - Equals sqrt(1 - R²) exactly on the same query set.
+  - Returns null when std(y_query) == 0 (degenerate constant target).
 
-A skipped combination writes:
-  {"skipped": true, "reason": "...", dataset, model, k, mode, seed, n_ctx, n_te}
+OUTPUT LAYOUT (for a given dataset, under `row_dir`):
+  metrics.jsonl
+     One record per (model, split_mode, k, mode, seed). Schema:
+       dataset, model, split_mode, k, mode, seed,
+       n_ctx, n_query, n_folds, n_features, y_query_std,
+       nrmse, r2, rmse, mae, fit_sec, predict_sec
+     n_ctx / n_query describe a SINGLE model invocation:
+       proportional:  n_ctx = k×n_tr,  n_query = n_te,  n_folds = 1
+       loo:           n_ctx = k×(N-1), n_query = 1,     n_folds = N
+     Skipped records:
+       {"skipped": true, "reason": "...", <base fields>}
+
+  predictions_<model>_<split>_<mode>_k<k>_s<seed>.csv
+     Per-combo detail. Columns: id, y_true, y_pred, residual.
+     For proportional: id = 0..n_te-1 (index in the held-out test set).
+     For loo:          id = 0..N-1   (index in the full dataset).
+     Skipped combos do NOT produce a CSV.
 """
 
 from __future__ import annotations
 
+import csv
 import logging
 import time
 from pathlib import Path
@@ -27,12 +49,14 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from src.configs import CONFIG, get_device
-from src.data.loaders import load_dataset
+from src.data.loaders import load_dataset, load_dataset_full
 from src.models.mlr_wrapper import MLRWithW
-from src.utils.io import write_jsonl
+from src.utils.io import ensure_dir, write_jsonl
 from src.utils.seed import set_seed
 
 logger = logging.getLogger(__name__)
+
+VALID_SPLIT_MODES = ("proportional", "loo")
 
 
 def duplicate_context(
@@ -44,16 +68,7 @@ def duplicate_context(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Tile (X, y) k-fold. In "jitter" mode, add N(0, sigma) noise to every
-    duplicated X cell (original rows are unchanged in "exact" and still
-    perturbed in "jitter" -- the sigma is tiny by design, so both start
-    from the same distribution).
-
-    ARGS:
-      X:    (n, f) feature matrix.
-      y:    (n,)   target vector.
-      k:    positive integer tile count.
-      mode: "exact" | "jitter".
-      rng:  numpy Generator (required -- this function never touches globals).
+    duplicated X cell (sigma from CONFIG["row_probe"]["jitter_sigma"]).
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
@@ -68,11 +83,21 @@ def duplicate_context(
 
 
 def _metric_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    mse = mean_squared_error(y_true, y_pred)
+    """Regression metrics, with nRMSE = RMSE/std(y_true). nrmse is None when
+    std=0; r² is NaN when n<2 or std=0."""
+    y_true = np.asarray(y_true, dtype=np.float64).ravel()
+    y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
+    mse = float(mean_squared_error(y_true, y_pred))
+    rmse = float(np.sqrt(mse))
+    y_std = float(np.std(y_true, ddof=0))
+    nrmse: float | None = float(rmse / y_std) if y_std > 0 else None
+    r2 = float(r2_score(y_true, y_pred)) if (y_true.size >= 2 and y_std > 0) else float("nan")
     return {
-        "r2": float(r2_score(y_true, y_pred)),
-        "rmse": float(np.sqrt(mse)),
+        "nrmse": nrmse,
+        "r2": r2,
+        "rmse": rmse,
         "mae": float(mean_absolute_error(y_true, y_pred)),
+        "y_query_std": y_std,
     }
 
 
@@ -98,102 +123,248 @@ def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed):
     return y_pred, fit_sec, predict_sec
 
 
-def run_row_probe(
+def _combo_stem(model: str, split_mode: str, mode: str, k: int, seed: int) -> str:
+    return f"predictions_{model}_{split_mode}_{mode}_k{k}_s{seed}"
+
+
+def _write_predictions_csv(
+    path: Path,
+    ids: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "y_true", "y_pred", "residual"])
+        for i, yt, yp in zip(ids, y_true, y_pred):
+            w.writerow([int(i), float(yt), float(yp), float(yt) - float(yp)])
+
+
+def _run_proportional(
     dataset: str,
-    out_path: Path,
+    row_dir: Path,
+    jsonl_path: Path,
     k_list: list[int],
     modes: list[str],
     seeds: list[int],
-    include_tabpfn: bool = True,
+    models: list[str],
+    n_ctx_limit: int,
 ) -> None:
-    """
-    Run all (model, k, mode, seed) combos and append to `out_path` as jsonl.
-
-    Caller is responsible for deleting the output file ahead of time if
-    `--fresh` semantics are wanted. Existing records are NOT resumed here --
-    keep it simple; resume semantics can be added later if needed.
-    """
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    n_ctx_limit = CONFIG["tabpfn"]["context_limit_n"]
-
     for seed in seeds:
         set_seed(seed)
         X_tr, y_tr, X_te, y_te, _names, is_nominal = load_dataset(dataset, seed)
         n_tr_original = X_tr.shape[0]
-        n_te = X_te.shape[0]
-        models = ["mlr"] + (["tabpfn"] if include_tabpfn else [])
+        n_query = X_te.shape[0]
+        n_features = X_tr.shape[1]
 
         for k in k_list:
             n_ctx = k * n_tr_original
             for mode in modes:
-                # rng for jitter: deterministic in (dataset, seed, k, mode).
-                rng = np.random.default_rng(
-                    np.random.SeedSequence(
-                        entropy=[seed, k, 0 if mode == "exact" else 1]
-                    )
-                )
+                rng = np.random.default_rng(np.random.SeedSequence(
+                    entropy=[seed, k, 0 if mode == "exact" else 1],
+                ))
                 X_ctx, y_ctx = duplicate_context(X_tr, y_tr, k, mode, rng)
 
                 for model in models:
                     base_rec = {
                         "dataset": dataset,
                         "model": model,
+                        "split_mode": "proportional",
                         "k": int(k),
                         "mode": mode,
                         "seed": int(seed),
                         "n_ctx": int(n_ctx),
-                        "n_te": int(n_te),
+                        "n_query": int(n_query),
+                        "n_folds": 1,
+                        "n_features": int(n_features),
                     }
 
                     if model == "tabpfn" and n_ctx > n_ctx_limit:
-                        rec = {
-                            "skipped": True,
-                            "reason": f"n_ctx > {n_ctx_limit}",
+                        write_jsonl(jsonl_path, [{
+                            "skipped": True, "reason": f"n_ctx > {n_ctx_limit}",
                             **base_rec,
-                        }
-                        write_jsonl(out_path, [rec], append=True)
-                        logger.info(
-                            "skip tabpfn k=%d mode=%s seed=%d (n_ctx=%d)",
-                            k, mode, seed, n_ctx,
-                        )
+                        }], append=True)
                         continue
 
                     try:
                         if model == "mlr":
                             y_pred, fit_sec, predict_sec = _fit_predict_mlr(
-                                X_ctx, y_ctx, X_te, is_nominal
+                                X_ctx, y_ctx, X_te, is_nominal,
                             )
                         else:
                             y_pred, fit_sec, predict_sec = _fit_predict_tabpfn(
-                                X_ctx, y_ctx, X_te, seed
+                                X_ctx, y_ctx, X_te, seed,
                             )
                     except Exception as e:  # noqa: BLE001
-                        rec = {
+                        write_jsonl(jsonl_path, [{
                             "skipped": True,
                             "reason": f"{type(e).__name__}: {e}",
                             **base_rec,
-                        }
-                        write_jsonl(out_path, [rec], append=True)
-                        logger.warning(
-                            "failed %s k=%d mode=%s seed=%d: %s",
-                            model, k, mode, seed, e,
-                        )
+                        }], append=True)
+                        logger.warning("failed %s k=%d mode=%s seed=%d: %s",
+                                       model, k, mode, seed, e)
                         continue
 
                     metrics = _metric_row(y_te, y_pred)
                     rec = {
                         **base_rec,
-                        "r2": metrics["r2"],
-                        "rmse": metrics["rmse"],
-                        "mae": metrics["mae"],
+                        "y_query_std": metrics["y_query_std"],
+                        "nrmse": metrics["nrmse"], "r2": metrics["r2"],
+                        "rmse": metrics["rmse"], "mae": metrics["mae"],
                         "fit_sec": float(fit_sec),
                         "predict_sec": float(predict_sec),
                     }
-                    write_jsonl(out_path, [rec], append=True)
+                    write_jsonl(jsonl_path, [rec], append=True)
+
+                    _write_predictions_csv(
+                        row_dir / f"{_combo_stem(model, 'proportional', mode, k, seed)}.csv",
+                        np.arange(n_query),
+                        np.asarray(y_te, dtype=np.float64),
+                        np.asarray(y_pred, dtype=np.float64),
+                    )
                     logger.info(
-                        "%s dataset=%s k=%d mode=%s seed=%d r2=%.4f fit=%.2fs predict=%.2fs",
-                        model, dataset, k, mode, seed, metrics["r2"],
+                        "%s dataset=%s k=%d mode=%s seed=%d nrmse=%s fit=%.2fs predict=%.2fs",
+                        model, dataset, k, mode, seed,
+                        f"{metrics['nrmse']:.4f}" if metrics["nrmse"] is not None else "N/A",
                         fit_sec, predict_sec,
                     )
+
+
+def _run_loo(
+    dataset: str,
+    row_dir: Path,
+    jsonl_path: Path,
+    k_list: list[int],
+    modes: list[str],
+    seeds: list[int],
+    models: list[str],
+    n_ctx_limit: int,
+) -> None:
+    for seed in seeds:
+        set_seed(seed)
+        X, y, _names, is_nominal = load_dataset_full(dataset, seed)
+        n = X.shape[0]
+        n_features = X.shape[1]
+        all_idx = np.arange(n)
+
+        for k in k_list:
+            n_ctx = k * (n - 1)
+            for mode in modes:
+                for model in models:
+                    base_rec = {
+                        "dataset": dataset, "model": model,
+                        "split_mode": "loo",
+                        "k": int(k), "mode": mode, "seed": int(seed),
+                        "n_ctx": int(n_ctx),
+                        "n_query": 1, "n_folds": int(n),
+                        "n_features": int(n_features),
+                    }
+
+                    if model == "tabpfn" and n_ctx > n_ctx_limit:
+                        write_jsonl(jsonl_path, [{
+                            "skipped": True, "reason": f"n_ctx > {n_ctx_limit}",
+                            **base_rec,
+                        }], append=True)
+                        continue
+
+                    y_true_all = np.empty(n, dtype=np.float64)
+                    y_pred_all = np.empty(n, dtype=np.float64)
+                    fit_sec_total = 0.0
+                    predict_sec_total = 0.0
+                    failed: Exception | None = None
+                    for i in range(n):
+                        mask = all_idx != i
+                        rng = np.random.default_rng(np.random.SeedSequence(
+                            entropy=[seed, k, 0 if mode == "exact" else 1, i],
+                        ))
+                        X_ctx, y_ctx = duplicate_context(
+                            X[mask], y[mask], k, mode, rng,
+                        )
+                        try:
+                            if model == "mlr":
+                                y_pred, fs, ps = _fit_predict_mlr(
+                                    X_ctx, y_ctx, X[i : i + 1], is_nominal,
+                                )
+                            else:
+                                y_pred, fs, ps = _fit_predict_tabpfn(
+                                    X_ctx, y_ctx, X[i : i + 1], seed,
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            failed = e
+                            break
+                        y_true_all[i] = float(y[i])
+                        y_pred_all[i] = float(y_pred[0])
+                        fit_sec_total += fs
+                        predict_sec_total += ps
+
+                    if failed is not None:
+                        write_jsonl(jsonl_path, [{
+                            "skipped": True,
+                            "reason": f"{type(failed).__name__}: {failed}",
+                            **base_rec,
+                        }], append=True)
+                        logger.warning("failed %s (LOO) k=%d mode=%s seed=%d: %s",
+                                       model, k, mode, seed, failed)
+                        continue
+
+                    metrics = _metric_row(y_true_all, y_pred_all)
+                    rec = {
+                        **base_rec,
+                        "y_query_std": metrics["y_query_std"],
+                        "nrmse": metrics["nrmse"], "r2": metrics["r2"],
+                        "rmse": metrics["rmse"], "mae": metrics["mae"],
+                        "fit_sec": float(fit_sec_total),
+                        "predict_sec": float(predict_sec_total),
+                    }
+                    write_jsonl(jsonl_path, [rec], append=True)
+
+                    _write_predictions_csv(
+                        row_dir / f"{_combo_stem(model, 'loo', mode, k, seed)}.csv",
+                        np.arange(n),
+                        y_true_all,
+                        y_pred_all,
+                    )
+                    logger.info(
+                        "%s (LOO) dataset=%s k=%d mode=%s seed=%d nrmse=%s "
+                        "fit=%.1fs predict=%.1fs",
+                        model, dataset, k, mode, seed,
+                        f"{metrics['nrmse']:.4f}" if metrics["nrmse"] is not None else "N/A",
+                        fit_sec_total, predict_sec_total,
+                    )
+
+
+def run_row_probe(
+    dataset: str,
+    row_dir: Path,
+    k_list: list[int],
+    modes: list[str],
+    seeds: list[int],
+    include_tabpfn: bool = True,
+    split_mode: str = "proportional",
+) -> None:
+    """
+    Run all (model, k, mode, seed) combos. Writes `metrics.jsonl` + one
+    `predictions_<combo>.csv` per non-skipped combo into `row_dir`.
+
+    Existing files are APPENDED/overwritten in place; the caller (CLI) is
+    responsible for clearing the dir ahead of time to enforce --fresh.
+    """
+    if split_mode not in VALID_SPLIT_MODES:
+        raise ValueError(
+            f"split_mode must be one of {VALID_SPLIT_MODES}, got {split_mode!r}"
+        )
+    row_dir = ensure_dir(row_dir)
+    jsonl_path = row_dir / "metrics.jsonl"
+
+    n_ctx_limit = CONFIG["tabpfn"]["context_limit_n"]
+    models = ["mlr"] + (["tabpfn"] if include_tabpfn else [])
+
+    if split_mode == "proportional":
+        _run_proportional(
+            dataset, row_dir, jsonl_path, k_list, modes, seeds, models, n_ctx_limit,
+        )
+    else:
+        _run_loo(
+            dataset, row_dir, jsonl_path, k_list, modes, seeds, models, n_ctx_limit,
+        )

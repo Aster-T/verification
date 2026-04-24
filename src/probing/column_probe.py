@@ -1,14 +1,16 @@
 """
 Column probe: fit MLR + TabPFN on a dataset, export W and column attention.
 
-No plotting is done here -- see src/viz/heatmap.py (Phase 5).
+No plotting is done here -- see src/viz/heatmap.py.
 
-OUTPUT LAYOUT (per 00_conventions.md):
-  <out_dir>/<dataset>/mlr.npz         keys: w_vec, w_outer, feature_names
-  <out_dir>/<dataset>/tabpfn.npz      keys: col_attn, col_attn_per_layer, feature_names
-                                     (omitted if TabPFN run failed/skipped)
-  <out_dir>/<dataset>/meta.json       seed, n_tr, n_te, n_features,
-                                     sklearn/tabpfn versions, tabpfn_status.
+OUTPUT LAYOUT:
+  <column_dir>/mlr.npz         keys: w_vec, w_outer, feature_names
+  <column_dir>/tabpfn.npz      keys: col_attn, col_attn_per_layer, feature_names
+                               (omitted if TabPFN run failed/skipped)
+  <column_dir>/meta.json       seed, n_tr, n_te, n_features,
+                               sklearn/tabpfn versions, tabpfn_status.
+
+`column_dir` is normally `results/<dataset>/column/`.
 """
 
 from __future__ import annotations
@@ -27,21 +29,20 @@ from src.utils.seed import set_seed
 logger = logging.getLogger(__name__)
 
 
-def run_column_probe(dataset: str, out_dir: Path, seed: int) -> None:
+def run_column_probe(dataset: str, column_dir: Path, seed: int) -> None:
     """
     Run MLR + TabPFN column probing for one dataset and persist numerical
     artefacts. See module docstring for the output layout.
 
     ARGS:
-      dataset: key in CONFIG["datasets"].
-      out_dir: parent directory, e.g. `results/column`. A subdir named
-        `<dataset>` is created under it.
-      seed:    forwarded to data loader, seed utility, and model seeds.
+      dataset:    key in CONFIG["datasets"].
+      column_dir: target directory (e.g. `results/<dataset>/column/`). Will be
+                  created if missing. Files are written directly into it.
+      seed:       forwarded to data loader, seed utility, and model seeds.
     """
     import sklearn  # noqa: PLC0415
 
-    out_dir = Path(out_dir)
-    target_dir = ensure_dir(out_dir / dataset)
+    target_dir = ensure_dir(column_dir)
 
     set_seed(seed)
     X_tr, y_tr, X_te, y_te, feature_names, is_nominal = load_dataset(dataset, seed)
@@ -117,3 +118,4 @@ def run_column_probe(dataset: str, out_dir: Path, seed: int) -> None:
         assert a_names == b_names, (
             f"feature_names misaligned for {dataset}: MLR={a_names} vs TabPFN={b_names}"
         )
+
