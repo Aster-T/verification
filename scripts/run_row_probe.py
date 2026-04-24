@@ -108,8 +108,18 @@ def main() -> None:
             "provide at least one of: --dataset / --openml-id / --openml-preset / --openml-all"
         )
 
+    # When --jitter-sigma is given, partition the results tree by sigma so
+    # sweeping multiple sigmas doesn't overwrite each other:
+    #   <out>/sigma_<σ>/<dataset>/row/...
+    # Otherwise use the plain layout <out>/<dataset>/row/.
+    out_root = args.out
+    if args.jitter_sigma is not None:
+        out_root = args.out / f"sigma_{args.jitter_sigma}"
+        logging.warning("jitter_sigma=%s -> results under %s",
+                        args.jitter_sigma, out_root)
+
     for ds in datasets:
-        row_dir = args.out / ds / "row"
+        row_dir = out_root / ds / "row"
         if args.fresh and row_dir.exists():
             for p_ in row_dir.glob("*"):
                 if p_.is_file():
