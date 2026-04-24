@@ -45,6 +45,14 @@ _STYLES = {
     ("tabpfn", "exact"): "--",
     ("tabpfn", "jitter"):"-",
 }
+# Marker also varies exact ↔ jitter so the two are distinguishable in the
+# legend even when the dash-vs-solid difference is too small to notice.
+_MARKERS = {
+    ("mlr", "exact"):    "o",
+    ("mlr", "jitter"):   "s",
+    ("tabpfn", "exact"): "o",
+    ("tabpfn", "jitter"):"s",
+}
 _PANEL_ORDER = [
     ("mlr", "exact"),
     ("mlr", "jitter"),
@@ -146,8 +154,9 @@ def _plot_combined(ax, series, skips):
                          for t in lanes])
         color = _COLORS.get((model, mode), "gray")
         style = _STYLES.get((model, mode), "-")
+        marker = _MARKERS.get((model, mode), "o")
         ax.plot(xs, means, style, color=color, linewidth=2,
-                marker="o", markersize=5,
+                marker=marker, markersize=6,
                 label=f"{model.upper()}/{mode}")
         ax.fill_between(xs, means - stds, means + stds,
                         color=color, alpha=0.15)
@@ -209,7 +218,11 @@ def _plot_combined(ax, series, skips):
         ])
         _apply_ylim_with_floor(ax, all_means)
     ax.legend(loc="center right", frameon=True, framealpha=0.92,
-              edgecolor="#aaaaaa")
+              edgecolor="#aaaaaa",
+              handlelength=3.5,   # show enough line for dash/solid to be obvious
+              handleheight=1.2,
+              borderpad=0.7,
+              labelspacing=0.7)
     _style_axes(ax)
 
 
