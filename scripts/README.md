@@ -193,7 +193,9 @@ results/<dataset>/row/
 }
 ```
 
-skip 条目写成 `{"skipped": true, "reason": "...", <base fields>}`,**不**配 CSV。
+skip 条目(**只**在 fit / predict 实际抛异常时产生,不再有预判阈值)写成
+`{"skipped": true, "reason": "<ExceptionType>: <msg>", <base fields>}`,
+**不**配 CSV。
 
 **`predictions_<combo>.csv` 列**
 

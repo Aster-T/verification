@@ -95,8 +95,9 @@ python scripts/export_datasets.py --openml-config path/to/other.json --openml-al
 
 **subsample 优先级**:preset 条目里的 `subsample` > CLI `--openml-subsample`
 > 默认**不设上限**。CLI 传 `--openml-subsample 0` 或任何非正整数也表示"不限"。
-跑 TabPFN 时(v2 context 上限 ~10k)建议显式给个 `--openml-subsample 2000`
-或在 preset 里写 `"subsample": 2000`。
+行探针本身**不再**限制 n_ctx;但 TabPFN v2 在 n_ctx ≳ 10k 时代价陡增,若
+显存吃紧建议显式给个 `--openml-subsample 2000` 或在 preset 里写
+`"subsample": 2000` 作为输入层的软控制。
 
 每次导出会覆盖目标子目录下的 `data.csv` 和 `meta.json`。
 

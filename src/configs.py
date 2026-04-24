@@ -48,31 +48,61 @@ CONFIG = {
     # -------------------------------------------------------------------------
     # Datasets
     #
-    # Each entry describes HOW to load the dataset; the actual loading is
-    # done in src/data/loaders.py by dispatching on "loader".
+    # Each entry describes HOW to load one dataset; actual loading happens in
+    # src/data/loaders.py by dispatching on the "loader" field. Four loader
+    # types are supported, each with its own required/optional fields.
+    #
+    # Shared fields (all loaders):
+    #   "loader"     str,  required. One of
+    #                  "sklearn_builtin" | "make_regression"
+    #                  | "openml_id"     | "local_csv"
+    #   "test_size"  float, optional (default 0.2). Fraction of rows held out
+    #                by load_dataset()'s train_test_split. Ignored by
+    #                load_dataset_full() and by row_probe with split_mode=loo.
+    #
+    # Per-loader schema:
+    #
+    #   loader == "sklearn_builtin":
+    #     "sklearn_name"  str,  required. "diabetes" | "california_housing".
+    #     "subsample"     int|None, optional. Cap rows via seed-deterministic
+    #                     random choice (None = keep all).
+    #
+    #   loader == "make_regression":
+    #     "n_samples"     int,  required.
+    #     "n_features"    int,  required.
+    #     "n_informative" int,  required.
+    #     "noise"         float, required. Std of gaussian noise added to y.
+    #
+    #   loader == "openml_id":
+    #     "openml_id"     int,  required. OpenML data_id (regression tasks
+    #                     only — classification targets are rejected).
+    #     "subsample"     int|None, optional. Row cap (None = keep all).
+    #     Normally registered via register_openml_dataset() or the
+    #     --openml-preset / --openml-id CLI paths, not hand-written here.
+    #
+    #   loader == "local_csv":
+    #     "path"          str,  required. Absolute path to datasets/<name>/
+    #                     (must contain data.csv + meta.json).
+    #     Normally registered automatically by _register_local_csv_if_present
+    #     on first use of --dataset <name>; hand-written entries are optional.
+    #
+    # Example entries (for reference — leave the dict empty to let local_csv /
+    # OpenML auto-registration populate it at runtime):
+    #
+    #   "diabetes": {
+    #       "loader": "sklearn_builtin",
+    #       "sklearn_name": "diabetes",
+    #       "test_size": 0.2,
+    #       "subsample": None,
+    #   },
+    #   "synth_linear": {
+    #       "loader": "make_regression",
+    #       "n_samples": 800, "n_features": 12,
+    #       "n_informative": 6, "noise": 5.0,
+    #       "test_size": 0.2,
+    #   },
     # -------------------------------------------------------------------------
-    "datasets": {
-        "diabetes": {
-            "loader": "sklearn_builtin",
-            "sklearn_name": "diabetes",
-            "test_size": 0.2,
-            "subsample": None,
-        },
-        "cali_housing": {
-            "loader": "sklearn_builtin",
-            "sklearn_name": "california_housing",
-            "test_size": 0.2,
-            "subsample": 2000,  # full set is 20k+; 2k keeps TabPFN happy.
-        },
-        "synth_linear": {
-            "loader": "make_regression",
-            "n_samples": 800,
-            "n_features": 12,
-            "n_informative": 6,
-            "noise": 5.0,
-            "test_size": 0.2,
-        },
-    },
+    "datasets": {},
     # -------------------------------------------------------------------------
     # TabPFN settings shared across probes
     #
