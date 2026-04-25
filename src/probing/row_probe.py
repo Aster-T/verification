@@ -70,10 +70,15 @@ def duplicate_context(
     is_nominal: list[bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Tile (X, y) k-fold. In "jitter" mode, add N(0, sigma) noise to every
-    duplicated X cell — **except** columns flagged nominal via `is_nominal`,
-    which pass through untouched. A nominal column's integer codes would be
-    corrupted by any float noise; it would not represent the same category.
+    Tile (X, y) k-fold. In "jitter" mode, add N(0, sigma) noise to the
+    duplicated X cells — **except**:
+      - the first tile (rows 0..n-1) is preserved as the original anchor and
+        receives no noise; only tiles 1..k-1 are perturbed.
+      - columns flagged nominal via `is_nominal` pass through untouched —
+        integer category codes would be corrupted by any float noise.
+    With anchor preservation, k=1 + jitter is numerically identical to exact
+    (no copies to perturb). For k>=2 the context is one pristine copy of X
+    plus (k-1) jittered copies.
 
     ARGS:
       jitter_sigma: if None, read CONFIG["row_probe"]["jitter_sigma"]
@@ -87,6 +92,7 @@ def duplicate_context(
         raise ValueError(f"k must be >= 1, got {k}")
     if mode not in ("exact", "jitter"):
         raise ValueError(f"mode must be 'exact' or 'jitter', got {mode!r}")
+    n = X.shape[0]
     X_rep = np.tile(X, (k, 1))
     y_rep = np.tile(y, k)
     if mode == "jitter":
@@ -94,17 +100,17 @@ def duplicate_context(
                  if jitter_sigma is None else jitter_sigma)
         if sigma < 0:
             raise ValueError(f"jitter_sigma must be >= 0, got {sigma}")
-        if sigma > 0:
-            if is_nominal is not None:
-                nominal_mask = np.asarray(is_nominal, dtype=bool)
-                if nominal_mask.shape[0] != X_rep.shape[1]:
-                    raise ValueError(
-                        f"is_nominal length {nominal_mask.shape[0]} != "
-                        f"X.shape[1] {X_rep.shape[1]}"
-                    )
-            else:
-                nominal_mask = None
+        if is_nominal is not None:
+            nominal_mask = np.asarray(is_nominal, dtype=bool)
+            if nominal_mask.shape[0] != X_rep.shape[1]:
+                raise ValueError(
+                    f"is_nominal length {nominal_mask.shape[0]} != "
+                    f"X.shape[1] {X_rep.shape[1]}"
+                )
+        else:
+            nominal_mask = None
 
+        if sigma > 0 and k >= 2:
             if X_rep.dtype == object:
                 # Per-column path: leave nominal/text columns exactly as-is,
                 # add N(0, sigma) noise to numeric columns only.
@@ -117,10 +123,15 @@ def duplicate_context(
                     if any(isinstance(v, str) for v in col):
                         continue
                     float_col = np.array(col, dtype=np.float64)
-                    float_col += rng.standard_normal(float_col.shape[0]) * sigma
+                    noise_col = rng.standard_normal(float_col.shape[0]) * sigma
+                    # Anchor: rows 0..n-1 are tile 0 — keep pristine.
+                    noise_col[:n] = 0.0
+                    float_col += noise_col
                     X_rep[:, j] = float_col
             else:
                 noise = rng.standard_normal(X_rep.shape) * sigma
+                # Anchor: rows 0..n-1 are tile 0 — keep pristine.
+                noise[:n, :] = 0.0
                 if nominal_mask is not None:
                     # Suppress noise on nominal columns so integer codes stay
                     # integer-valued (preserves the category semantics).
