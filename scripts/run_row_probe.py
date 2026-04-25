@@ -12,7 +12,9 @@ REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "third-party" / "tabpfn" / "src"))
 
-from src.configs import CONFIG, add_openml_cli_args, resolve_openml_args, sigma_tag  # noqa: E402
+from src.configs import (  # noqa: E402
+    CONFIG, add_openml_cli_args, resolve_openml_args, sigma_tag, test_size_tag,
+)
 from src.probing.row_probe import VALID_SPLIT_MODES, run_row_probe  # noqa: E402
 
 
@@ -118,12 +120,19 @@ def main() -> None:
     # When --jitter-sigma is given, partition the results tree by sigma so
     # sweeping multiple sigmas doesn't overwrite each other:
     #   <out>/sigma_<σ>/<dataset>/row/...
-    # Otherwise use the plain layout <out>/<dataset>/row/.
+    # In proportional mode we additionally partition by test_size so the
+    # 9 test_size sweep produces 9 distinct result subtrees:
+    #   <out>/sigma_<σ>/test_size_<ts>/<dataset>/row/...
+    # LOO output paths are NOT partitioned by test_size (LOO ignores it).
     out_root = args.out
     if args.jitter_sigma is not None:
-        out_root = args.out / f"sigma_{sigma_tag(args.jitter_sigma)}"
+        out_root = out_root / f"sigma_{sigma_tag(args.jitter_sigma)}"
         logging.warning("jitter_sigma=%s -> results under %s",
                         args.jitter_sigma, out_root)
+    if args.split_mode == "proportional":
+        out_root = out_root / f"test_size_{test_size_tag(args.test_size)}"
+        logging.warning("test_size=%s -> proportional results under %s",
+                        args.test_size, out_root)
 
     for ds in datasets:
         row_dir = out_root / ds / "row"

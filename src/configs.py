@@ -417,6 +417,21 @@ def sigma_tag(sigma: float) -> str:
     return f"{m_out}e{e}"
 
 
+def test_size_tag(test_size: float) -> str:
+    """
+    Format a test_size float as a short, filesystem-safe tag for the
+    `test_size_<tag>/` results subtree (proportional split mode partitioned
+    by query-set fraction).
+
+    Examples:
+      test_size_tag(0.5)  -> "0.5"
+      test_size_tag(0.1)  -> "0.1"
+      test_size_tag(0.25) -> "0.25"
+      test_size_tag(0.2)  -> "0.2"
+    """
+    return f"{test_size:g}"
+
+
 def get_device() -> str:
     """
     Return the tabpfn device from CONFIG, falling back to 'cpu' if cuda is

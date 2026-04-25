@@ -1,10 +1,26 @@
 """
 Self-contained HTML report: embeds PNGs as base64 and pastes per-dataset
-aggregated tables from the row jsonl.
+aggregated tables from row jsonls.
 
-No external CSS / JS; the <style> / <script> blocks are inline. The
-report supports light / dark theme (button in the header; respects
-`prefers-color-scheme` and persists the choice in localStorage).
+Layout knowledge:
+
+  sigma_root/
+    <ds>/
+      row/metrics.jsonl   <- LOO row probe (test_size-independent)
+      column/{mlr,tabpfn}.npz, viz/...
+      viz/row_curve*.png  <- LOO plots
+    test_size_<ts>/<ds>/
+      row/metrics.jsonl   <- proportional row probe per test_size
+      viz/row_curve*.png  <- per-test_size plots
+    report.html
+
+A single HTML covers all test_sizes via a top-of-page dropdown. Column-probe
+and LOO sections are always visible (test_size-independent). Proportional
+row-probe sections come in N copies (one per discovered test_size) wrapped in
+`<div class="ts-content" data-ts=...>` and gated by a JS toggle.
+
+No external CSS / JS; the <style> / <script> blocks are inline. Theme toggle
+(light/dark) and test_size dropdown both persist their choice in localStorage.
 
 Usage via scripts/build_report.py.
 """
@@ -86,6 +102,7 @@ _STYLE = """
     padding: 0.5rem 0 1.25rem;
     border-bottom: 2px solid var(--border);
     margin-bottom: 1.75rem;
+    flex-wrap: wrap;
   }
   header h1 {
     font-size: 1.75rem;
@@ -93,6 +110,35 @@ _STYLE = """
     margin: 0;
     letter-spacing: -0.01em;
   }
+  .header-controls {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .ts-picker {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--fg-soft);
+    padding: 0.35rem 0.7rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+  }
+  .ts-picker label { font-weight: 500; }
+  .ts-picker select {
+    background: transparent;
+    border: none;
+    color: var(--fg);
+    font-size: 0.875rem;
+    font-weight: 600;
+    padding: 0.1rem 0.2rem;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .ts-picker select:focus { outline: 1px solid var(--accent); }
   .theme-toggle {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -171,6 +217,19 @@ _STYLE = """
     border-left: 3px solid var(--accent);
     text-transform: uppercase;
     letter-spacing: 0.04em;
+  }
+  .ts-content { /* JS toggles via display: none */ }
+  .ts-tag {
+    display: inline-block;
+    margin-left: 0.6rem;
+    padding: 0.1rem 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 0.35rem;
+    letter-spacing: 0.02em;
+    text-transform: none;
   }
 
   /* ---------- Images ---------- */
@@ -293,33 +352,55 @@ _STYLE = """
 _SCRIPT = """
 <script>
 (function() {
-  const KEY = 'probing-report-theme';
   const html = document.documentElement;
-  const btn = document.getElementById('theme-toggle');
-  if (!btn) return;
 
-  function apply(theme) {
+  // ---- theme toggle ----
+  const THEME_KEY = 'probing-report-theme';
+  const tbtn = document.getElementById('theme-toggle');
+  function applyTheme(theme) {
     html.setAttribute('data-theme', theme);
-    btn.innerHTML = theme === 'dark'
-      ? '<span aria-hidden="true">☀</span> Light'
-      : '<span aria-hidden="true">☾</span> Dark';
-    btn.setAttribute('aria-pressed', theme === 'dark');
+    if (tbtn) {
+      tbtn.innerHTML = theme === 'dark'
+        ? '<span aria-hidden="true">☀</span> Light'
+        : '<span aria-hidden="true">☾</span> Dark';
+      tbtn.setAttribute('aria-pressed', theme === 'dark');
+    }
+  }
+  let initialTheme = localStorage.getItem(THEME_KEY);
+  if (!initialTheme) {
+    initialTheme = (window.matchMedia &&
+                    window.matchMedia('(prefers-color-scheme: dark)').matches)
+                   ? 'dark' : 'light';
+  }
+  applyTheme(initialTheme);
+  if (tbtn) {
+    tbtn.addEventListener('click', () => {
+      const next = (html.getAttribute('data-theme') === 'dark') ? 'light' : 'dark';
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+    });
   }
 
-  // Initial resolve: saved > system > light.
-  let initial = localStorage.getItem(KEY);
-  if (!initial) {
-    initial = (window.matchMedia &&
-               window.matchMedia('(prefers-color-scheme: dark)').matches)
-              ? 'dark' : 'light';
+  // ---- test_size dropdown ----
+  const TS_KEY = 'probing-report-test-size';
+  const tsSelect = document.getElementById('ts-select');
+  function applyTestSize(ts) {
+    document.body.setAttribute('data-current-ts', ts);
+    document.querySelectorAll('.ts-content').forEach(el => {
+      el.style.display = (el.dataset.ts === ts) ? '' : 'none';
+    });
+    if (tsSelect && tsSelect.value !== ts) tsSelect.value = ts;
   }
-  apply(initial);
-
-  btn.addEventListener('click', () => {
-    const next = (html.getAttribute('data-theme') === 'dark') ? 'light' : 'dark';
-    localStorage.setItem(KEY, next);
-    apply(next);
-  });
+  if (tsSelect) {
+    const available = Array.from(tsSelect.options).map(o => o.value);
+    let initialTs = localStorage.getItem(TS_KEY);
+    if (!available.includes(initialTs)) initialTs = available[0];
+    applyTestSize(initialTs);
+    tsSelect.addEventListener('change', () => {
+      localStorage.setItem(TS_KEY, tsSelect.value);
+      applyTestSize(tsSelect.value);
+    });
+  }
 })();
 </script>
 """
@@ -337,7 +418,7 @@ def _aggregate_row_table(jsonl_path: Path) -> str:
     """
     Render a per-(split_mode, model, mode, k) summary table. Columns:
       split, model, mode, k, n_ctx, n_query, n_folds, n_features,
-      nRMSE (mean ± std over seeds), R², RMSE, MAE, skipped.
+      nRMSE (mean +- std over seeds), R^2, RMSE, MAE, skipped.
     """
     records = read_jsonl(jsonl_path) if jsonl_path.exists() else []
     if not records:
@@ -350,7 +431,6 @@ def _aggregate_row_table(jsonl_path: Path) -> str:
         row = by_key.setdefault(key, {
             "nrmse": [], "r2": [], "rmse": [], "mae": [], "skipped": 0,
             "n_ctx": r.get("n_ctx"),
-            # Accept both new 'n_query' and legacy 'n_te'.
             "n_query": r.get("n_query", r.get("n_te")),
             "n_folds": r.get("n_folds", 1),
             "n_features": r.get("n_features"),
@@ -406,78 +486,136 @@ def _aggregate_row_table(jsonl_path: Path) -> str:
     )
 
 
+def _row_curve_block(viz_dir: Path) -> str:
+    """Return the HTML fragment for the row-curve combined plot + facet grid
+    rendered out of a viz directory. Empty string when the combined PNG is
+    missing."""
+    row_curve = viz_dir / "row_curve.png"
+    if not row_curve.exists():
+        return '<div class="note">No row_curve.png in this viz dir.</div>'
+    facets = "".join(
+        _img_tag(viz_dir / f"row_curve_{m}_{md}.png", f"{m.upper()} / {md}")
+        for (m, md) in [("mlr", "exact"), ("mlr", "jitter"),
+                        ("tabpfn", "exact"), ("tabpfn", "jitter")]
+    )
+    return (
+        f'{_img_tag(row_curve, "Row curve - all combined")}'
+        '<details>'
+        '<summary>各 (model, mode) 单独视图 '
+        '(独立 y 轴 scale)</summary>'
+        f'<div class="facet-grid">{facets}</div>'
+        '</details>'
+    )
+
+
+def _ts_label(ts_dir: Path) -> str:
+    """test_size_0.5 -> '0.5'."""
+    return ts_dir.name[len("test_size_"):]
+
+
 def build_report(
     datasets: list[str],
-    results_root: Path,
+    sigma_root: Path,
+    test_size_dirs: list[Path],
     out_html: Path,
 ) -> Path:
     """
-    Render a single HTML file embedding heatmaps, curves and aggregated tables
-    for all `datasets`. Missing artefacts per dataset fall back to placeholders.
-    Includes a light/dark theme toggle in the header.
+    Render a single HTML file embedding all artefacts under `sigma_root`.
+
+    LOO and column-probe blocks (under `sigma_root/<ds>/`) are always visible.
+    Proportional blocks under each `test_size_<ts>/<ds>/` are wrapped in
+    `<div class="ts-content" data-ts=...>` and shown one at a time via the
+    header dropdown.
+
+    `test_size_dirs` is the list of `sigma_root/test_size_<ts>` directories
+    that exist (in numeric order). Pass [] to skip the dropdown entirely.
     """
-    results_root = Path(results_root)
+    sigma_root = Path(sigma_root)
     out_html = Path(out_html)
     out_html.parent.mkdir(parents=True, exist_ok=True)
 
     nav = "".join(f'<a href="#{ds}">{ds}</a>' for ds in datasets)
-    sections = []
-    for ds in datasets:
-        viz_dir = results_root / ds / "viz"
-        side_by_side = viz_dir / "side_by_side.png"
-        per_layer = viz_dir / "tabpfn_per_layer.png"
-        row_curve = viz_dir / "row_curve.png"
-        row_single = [
-            (viz_dir / f"row_curve_{m}_{md}.png", f"{m.upper()} / {md}")
-            for (m, md) in [("mlr", "exact"), ("mlr", "jitter"),
-                            ("tabpfn", "exact"), ("tabpfn", "jitter")]
-        ]
-        jsonl_path = results_root / ds / "row" / "metrics.jsonl"
 
-        # Detect TabPFN skip: tabpfn.npz missing for this dataset.
-        tp_path = results_root / ds / "column" / "tabpfn.npz"
+    sections: list[str] = []
+    any_prop_data = False
+    for ds in datasets:
+        sigma_ds = sigma_root / ds
+        loo_jsonl = sigma_ds / "row" / "metrics.jsonl"
+        sigma_viz = sigma_ds / "viz"
+        column_dir = sigma_ds / "column"
+
         notes: list[str] = []
-        if not tp_path.exists():
+        if column_dir.exists() and not (column_dir / "tabpfn.npz").exists():
             notes.append(
                 '<div class="note">TabPFN column probe not run; '
                 'heatmaps show MLR only.</div>'
             )
 
-        # Skip entire column block if MLR column artefacts don't exist either.
-        column_npz = results_root / ds / "column" / "mlr.npz"
-        has_column = column_npz.exists()
-
         column_block = ""
-        if has_column:
-            column_block = f"""
-              <h3>列探索 (column probe)</h3>
-              {_img_tag(side_by_side, "Column probe — side by side")}
-              <details>
-                <summary>逐层 TabPFN attention</summary>
-                {_img_tag(per_layer, "Per-layer TabPFN attention")}
-              </details>
-            """
+        if (column_dir / "mlr.npz").exists():
+            column_block = (
+                '<h3>列探索 (column probe)</h3>'
+                f'{_img_tag(sigma_viz / "side_by_side.png", "Column probe - side by side")}'
+                '<details>'
+                '<summary>逐层 TabPFN attention</summary>'
+                f'{_img_tag(sigma_viz / "tabpfn_per_layer.png", "Per-layer TabPFN attention")}'
+                '</details>'
+            )
 
-        table_html = _aggregate_row_table(jsonl_path)
+        loo_block = ""
+        if loo_jsonl.exists():
+            loo_block = (
+                '<h3>行探索 (row probe — LOO)</h3>'
+                f'{_row_curve_block(sigma_viz)}'
+                f'{_aggregate_row_table(loo_jsonl)}'
+            )
 
-        facet_imgs = "".join(_img_tag(p, label) for p, label in row_single)
+        prop_blocks: list[str] = []
+        for ts_dir in test_size_dirs:
+            prop_jsonl = ts_dir / ds / "row" / "metrics.jsonl"
+            if not prop_jsonl.exists():
+                continue
+            any_prop_data = True
+            ts = _ts_label(ts_dir)
+            prop_blocks.append(
+                f'<div class="ts-content" data-ts="{ts}">'
+                f'<h3>行探索 (row probe — proportional)'
+                f'<span class="ts-tag">test_size = {ts}</span></h3>'
+                f'{_row_curve_block(ts_dir / ds / "viz")}'
+                f'{_aggregate_row_table(prop_jsonl)}'
+                '</div>'
+            )
+
+        if not (column_block or loo_block or prop_blocks):
+            sections.append(
+                f'<section id="{ds}"><h2>{ds}</h2>'
+                '<div class="note">No artefacts found for this dataset.</div>'
+                '</section>'
+            )
+            continue
 
         sections.append(
-            f"""
-            <section id="{ds}">
-              <h2>{ds}</h2>
-              {"".join(notes)}
-              {column_block}
+            f'<section id="{ds}">'
+            f'<h2>{ds}</h2>'
+            f'{"".join(notes)}'
+            f'{column_block}'
+            f'{loo_block}'
+            f'{"".join(prop_blocks)}'
+            '</section>'
+        )
 
-              <h3>行探索 (row probe)</h3>
-              {_img_tag(row_curve, "Row curve — all combined")}
-              <details>
-                <summary>各 (model, mode) 单独视图 (独立 y 轴 scale)</summary>
-                <div class="facet-grid">{facet_imgs}</div>
-              </details>
-              {table_html}
-            </section>
-            """
+    # Build the dropdown only if proportional data exists somewhere.
+    ts_picker_html = ""
+    if any_prop_data and test_size_dirs:
+        opts = "".join(
+            f'<option value="{_ts_label(d)}">{_ts_label(d)}</option>'
+            for d in test_size_dirs
+        )
+        ts_picker_html = (
+            '<div class="ts-picker">'
+            '<label for="ts-select">test_size:</label>'
+            f'<select id="ts-select">{opts}</select>'
+            '</div>'
         )
 
     html = f"""<!doctype html>
@@ -491,10 +629,13 @@ def build_report(
 <body>
   <header>
     <h1>TabPFN vs MLR — Rows &amp; Columns Probing</h1>
-    <button class="theme-toggle" id="theme-toggle"
-            type="button" aria-pressed="false">
-      <span aria-hidden="true">☾</span> Dark
-    </button>
+    <div class="header-controls">
+      {ts_picker_html}
+      <button class="theme-toggle" id="theme-toggle"
+              type="button" aria-pressed="false">
+        <span aria-hidden="true">☾</span> Dark
+      </button>
+    </div>
   </header>
   <nav>{nav}</nav>
   {''.join(sections)}
