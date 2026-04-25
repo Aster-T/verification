@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
+
+# Silence tabpfn-common-utils' PostHog telemetry (see run_row_probe.py).
+os.environ.setdefault("TABPFN_DISABLE_TELEMETRY", "1")
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent

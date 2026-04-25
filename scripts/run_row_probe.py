@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
+
+# Silence tabpfn-common-utils' PostHog telemetry. Each TabPFN fit/predict
+# emits one event; LOO mode fires ~150k calls per dataset and the async
+# queue overflows ("analytics-python queue is full"). setdefault leaves any
+# externally-set value alone. Set BEFORE importing tabpfn so the service
+# reads the env var at init time.
+os.environ.setdefault("TABPFN_DISABLE_TELEMETRY", "1")
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
