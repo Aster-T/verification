@@ -235,6 +235,13 @@ def _run_proportional(
         n_tr_original = X_tr.shape[0]
         n_query = X_te.shape[0]
         n_features = X_tr.shape[1]
+        logger.info(
+            "split dataset=%s seed=%d test_size=%g n_train=%d n_test=%d "
+            "n_features=%d n_nominal=%d",
+            dataset, seed, effective_test_size,
+            n_tr_original, n_query, n_features,
+            sum(is_nominal) if is_nominal is not None else 0,
+        )
 
         for k in k_list:
             n_ctx = k * n_tr_original
@@ -338,6 +345,12 @@ def _run_loo(
         n = X.shape[0]
         n_features = X.shape[1]
         all_idx = np.arange(n)
+        logger.info(
+            "split dataset=%s seed=%d split_mode=loo n_folds=%d "
+            "n_features=%d n_nominal=%d",
+            dataset, seed, n, n_features,
+            sum(is_nominal) if is_nominal is not None else 0,
+        )
 
         for k in k_list:
             n_ctx = k * (n - 1)
@@ -481,6 +494,30 @@ def run_row_probe(
     jsonl_path = row_dir / "metrics.jsonl"
 
     models = ["mlr"] + (["tabpfn"] if include_tabpfn else [])
+
+    effective_sigma = (
+        jitter_sigma if jitter_sigma is not None
+        else float(CONFIG["row_probe"]["jitter_sigma"])
+    )
+    sigma_str = f"{effective_sigma:g}" if "jitter" in modes else "n/a"
+    test_size_str: str
+    if split_mode == "proportional":
+        if test_size is not None:
+            test_size_str = f"{test_size:g}"
+        else:
+            test_size_str = (
+                f"{float(get_dataset_cfg(dataset).get('test_size', 0.2)):g}"
+                f" (from CONFIG)"
+            )
+    else:
+        test_size_str = "n/a (loo)"
+    logger.info(
+        "row_probe start dataset=%s split_mode=%s models=%s "
+        "k_list=%s modes=%s seeds=%s test_size=%s jitter_sigma=%s "
+        "tabpfn_numeric=%s out=%s",
+        dataset, split_mode, models, k_list, modes, seeds,
+        test_size_str, sigma_str, tabpfn_numeric, row_dir,
+    )
 
     if split_mode == "proportional":
         _run_proportional(
