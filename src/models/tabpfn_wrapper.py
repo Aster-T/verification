@@ -39,7 +39,9 @@ CONFIGURATION KNOBS FOR ALIGNMENT:
            categorical_name="none", append_original=False,
            global_transformer_name=None)],  # no SVD / no quantile re-scale
       "OUTLIER_REMOVAL_STD": None,
-      "REGRESSION_Y_PREPROCESS_TRANSFORMS": (None,),
+      "REGRESSION_Y_PREPROCESS_TRANSFORMS":
+          (None,)              when preprocess_y=False  # column_probe (default)
+          (None, "safepower")  when preprocess_y=True   # row_probe
     }
   See shuffle_features_step.py: when shuffle_method is None the permutation
   is np.arange(F), i.e. identity.
@@ -193,7 +195,11 @@ def capture_column_attention(tabpfn_inner_model):
             mod.forward = orig
 
 
-def _build_inference_config_overrides(categorical_name: str = "none") -> dict:
+def _build_inference_config_overrides(
+    categorical_name: str = "none",
+    *,
+    preprocess_y: bool = False,
+) -> dict:
     """
     Build an inference_config dict that keeps feature count and order identical
     between input X and the attention matrix. See module docstring for the
@@ -206,6 +212,14 @@ def _build_inference_config_overrides(categorical_name: str = "none") -> dict:
         when X carries real string columns so TabPFN's internal categorical
         handler can encode them; this preserves feature COUNT but may reorder
         categories internally, which is fine for row-probe purposes.
+      preprocess_y: when False (default, required by column-probe), disable
+        TabPFN's internal y-preprocessing ensemble — the transformer sees
+        the raw y scale. When True, restore TabPFN's default regression
+        y-preprocess ``(None, "safepower")`` so heavy-tailed targets get
+        squashed before going through the model. Row probing should set this
+        to True — it doesn't consume attention, and without it datasets like
+        forest-fires (y in [0, 1091], 48% zeros) can push TabPFN into
+        NaN-producing numerics in half-precision inference.
     """
     from tabpfn.preprocessing.configs import PreprocessorConfig
 
@@ -222,7 +236,9 @@ def _build_inference_config_overrides(categorical_name: str = "none") -> dict:
             )
         ],
         "OUTLIER_REMOVAL_STD": None,
-        "REGRESSION_Y_PREPROCESS_TRANSFORMS": (None,),
+        "REGRESSION_Y_PREPROCESS_TRANSFORMS": (
+            (None, "safepower") if preprocess_y else (None,)
+        ),
     }
 
 
@@ -232,6 +248,7 @@ class TabPFNWithColAttn:
         device: str = "cuda",
         seed: int = 0,
         accept_text: bool = True,
+        preprocess_y: bool = False,
     ) -> None:
         """
         ARGS:
@@ -246,6 +263,11 @@ class TabPFNWithColAttn:
             X (this is the mode used by column_probe where feature-axis
             alignment with MLR is critical, and also reachable via
             `--tabpfn-numeric` on run_row_probe.py).
+          preprocess_y: when False (default, required by column-probe),
+            disable TabPFN's internal y-preprocessing ensemble. When True,
+            restore the stock ``(None, "safepower")`` so heavy-tailed targets
+            are squashed before the transformer — recommended for row probing,
+            where attention alignment isn't consumed.
         """
         if device == "cuda" and not torch.cuda.is_available():
             logger.warning("cuda requested but unavailable; falling back to cpu.")
@@ -253,6 +275,7 @@ class TabPFNWithColAttn:
         self.device = device
         self.seed = seed
         self.accept_text = accept_text
+        self.preprocess_y = preprocess_y
         self._regressor = None
         self._inner_model = None
         self._last_attn: list[tuple[int, torch.Tensor]] | None = None
@@ -273,7 +296,9 @@ class TabPFNWithColAttn:
             device=self.device,
             random_state=self.seed,
             ignore_pretraining_limits=True,
-            inference_config=_build_inference_config_overrides(cat_name),
+            inference_config=_build_inference_config_overrides(
+                cat_name, preprocess_y=self.preprocess_y,
+            ),
         )
 
     @staticmethod

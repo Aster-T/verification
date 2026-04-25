@@ -167,8 +167,12 @@ def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed, *, accept_text: bool = True):
     from src.models.tabpfn_wrapper import TabPFNWithColAttn  # noqa: PLC0415
 
     t0 = time.perf_counter()
+    # preprocess_y=True restores TabPFN's default (None, "safepower") y-preprocess
+    # ensemble, which row probing needs for heavy-tailed targets. Column probing
+    # keeps it disabled for attention alignment.
     m = TabPFNWithColAttn(
-        device=get_device(), seed=seed, accept_text=accept_text,
+        device=get_device(), seed=seed,
+        accept_text=accept_text, preprocess_y=True,
     ).fit(X_ctx, y_ctx)
     fit_sec = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -267,7 +271,21 @@ def _run_proportional(
                                        model, k, mode, seed, e)
                         continue
 
-                    metrics = _metric_row(y_te, y_pred)
+                    y_pred_arr = np.asarray(y_pred, dtype=np.float64).ravel()
+                    if not np.all(np.isfinite(y_pred_arr)):
+                        n_bad = int(np.sum(~np.isfinite(y_pred_arr)))
+                        write_jsonl(jsonl_path, [{
+                            "skipped": True,
+                            "reason": f"non-finite y_pred ({n_bad}/{y_pred_arr.size})",
+                            **base_rec,
+                        }], append=True)
+                        logger.warning(
+                            "failed %s k=%d mode=%s seed=%d: non-finite y_pred (%d/%d)",
+                            model, k, mode, seed, n_bad, y_pred_arr.size,
+                        )
+                        continue
+
+                    metrics = _metric_row(y_te, y_pred_arr)
                     rec = {
                         **base_rec,
                         "y_query_std": metrics["y_query_std"],
@@ -282,7 +300,7 @@ def _run_proportional(
                         row_dir / f"{_combo_stem(model, 'proportional', mode, k, seed)}.csv",
                         np.arange(n_query),
                         np.asarray(y_te, dtype=np.float64),
-                        np.asarray(y_pred, dtype=np.float64),
+                        y_pred_arr,
                     )
                     logger.info(
                         "%s dataset=%s k=%d mode=%s seed=%d nrmse=%s fit=%.2fs predict=%.2fs",
@@ -328,6 +346,7 @@ def _run_loo(
                     fit_sec_total = 0.0
                     predict_sec_total = 0.0
                     failed: Exception | None = None
+                    nonfinite_fold: int | None = None
                     for i in range(n):
                         mask = all_idx != i
                         rng = np.random.default_rng(np.random.SeedSequence(
@@ -351,8 +370,12 @@ def _run_loo(
                         except Exception as e:  # noqa: BLE001
                             failed = e
                             break
+                        yp = float(np.asarray(y_pred, dtype=np.float64).ravel()[0])
+                        if not np.isfinite(yp):
+                            nonfinite_fold = i
+                            break
                         y_true_all[i] = float(y[i])
-                        y_pred_all[i] = float(y_pred[0])
+                        y_pred_all[i] = yp
                         fit_sec_total += fs
                         predict_sec_total += ps
 
@@ -364,6 +387,18 @@ def _run_loo(
                         }], append=True)
                         logger.warning("failed %s (LOO) k=%d mode=%s seed=%d: %s",
                                        model, k, mode, seed, failed)
+                        continue
+
+                    if nonfinite_fold is not None:
+                        write_jsonl(jsonl_path, [{
+                            "skipped": True,
+                            "reason": f"non-finite y_pred at fold {nonfinite_fold}",
+                            **base_rec,
+                        }], append=True)
+                        logger.warning(
+                            "failed %s (LOO) k=%d mode=%s seed=%d: non-finite y_pred at fold %d",
+                            model, k, mode, seed, nonfinite_fold,
+                        )
                         continue
 
                     metrics = _metric_row(y_true_all, y_pred_all)
