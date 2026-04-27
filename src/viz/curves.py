@@ -33,25 +33,29 @@ from src.configs import CONFIG  # noqa: E402
 from src.utils.io import read_jsonl  # noqa: E402
 
 
+# Four fully distinct colors (Tableau-style) — picked so that overlapping
+# lines remain distinguishable even when markers, hues, or line styles
+# coincide. No two series share a hue.
 _COLORS = {
-    ("mlr", "exact"):    "#1f77b4",
-    ("mlr", "jitter"):   "#3a8dcc",
-    ("tabpfn", "exact"): "#d62728",
-    ("tabpfn", "jitter"):"#e65757",
+    ("mlr", "exact"):    "#1f77b4",  # blue
+    ("mlr", "jitter"):   "#ff7f0e",  # orange
+    ("tabpfn", "exact"): "#2ca02c",  # green
+    ("tabpfn", "jitter"):"#d62728",  # red
 }
+# Four distinct line styles + four distinct markers. Either alone is enough
+# to identify a series; together they're robust to b/w printing or color
+# blindness.
 _STYLES = {
     ("mlr", "exact"):    "--",
     ("mlr", "jitter"):   "-",
-    ("tabpfn", "exact"): "--",
-    ("tabpfn", "jitter"):"-",
+    ("tabpfn", "exact"): "-.",
+    ("tabpfn", "jitter"):":",
 }
-# Marker also varies exact ↔ jitter so the two are distinguishable in the
-# legend even when the dash-vs-solid difference is too small to notice.
 _MARKERS = {
     ("mlr", "exact"):    "o",
     ("mlr", "jitter"):   "s",
-    ("tabpfn", "exact"): "o",
-    ("tabpfn", "jitter"):"s",
+    ("tabpfn", "exact"): "^",
+    ("tabpfn", "jitter"):"D",
 }
 _PANEL_ORDER = [
     ("mlr", "exact"),
@@ -59,13 +63,16 @@ _PANEL_ORDER = [
     ("tabpfn", "exact"),
     ("tabpfn", "jitter"),
 ]
-# For the combined 4-line plot: vertical (points) offset per line, so the
-# labels zigzag across 4 'lanes' instead of all piling on one line.
-_COMBINED_OFFSET = {
-    ("mlr", "exact"):    ("up",   14),
-    ("mlr", "jitter"):   ("down", 14),
-    ("tabpfn", "exact"): ("up",   42),
-    ("tabpfn", "jitter"):("down", 42),
+# Combined-plot label layout: each series annotates one residue class of
+# x-indices (mod 4) so labels stagger horizontally instead of stacking.
+# `dy` puts each series in its own vertical lane; `endpoints` forces the
+# first and last x to always be labeled regardless of the residue class,
+# so endpoints are never silently dropped.
+_COMBINED_LABEL = {
+    ("mlr", "exact"):    {"mod": 0, "dy": +30, "endpoints": True},
+    ("mlr", "jitter"):   {"mod": 1, "dy": -22, "endpoints": True},
+    ("tabpfn", "exact"): {"mod": 2, "dy": +18, "endpoints": True},
+    ("tabpfn", "jitter"):{"mod": 3, "dy": -36, "endpoints": True},
 }
 
 
@@ -155,41 +162,48 @@ def _plot_combined(ax, series, skips):
         color = _COLORS.get((model, mode), "gray")
         style = _STYLES.get((model, mode), "-")
         marker = _MARKERS.get((model, mode), "o")
-        ax.plot(xs, means, style, color=color, linewidth=2,
-                marker=marker, markersize=6,
+        ax.plot(xs, means, style, color=color, linewidth=1.8,
+                marker=marker, markersize=7, markeredgecolor="white",
+                markeredgewidth=0.6,
                 label=f"{model.upper()}/{mode}")
         ax.fill_between(xs, means - stds, means + stds,
-                        color=color, alpha=0.15)
-        direction, base = _COMBINED_OFFSET.get((model, mode), ("up", 14))
-        sign = +1 if direction == "up" else -1
+                        color=color, alpha=0.12)
+        cfg = _COMBINED_LABEL.get((model, mode),
+                                  {"mod": 0, "dy": 14, "endpoints": True})
+        n = len(xs)
         for i, (x, ym) in enumerate(zip(xs, means)):
             if not np.isfinite(ym):
                 continue
-            dy = sign * (base + (i % 2) * 14)
+            is_endpoint = cfg["endpoints"] and (i == 0 or i == n - 1)
+            if (i % 4) != cfg["mod"] and not is_endpoint:
+                continue
             ax.annotate(
                 f"({int(x)}, {ym:.3f})",
-                xy=(x, ym), xytext=(0, dy), textcoords="offset points",
+                xy=(x, ym), xytext=(0, cfg["dy"]),
+                textcoords="offset points",
                 ha="center", va="center", fontsize=7, color=color,
                 arrowprops=dict(arrowstyle="-", color=color,
                                 lw=0.4, alpha=0.5, shrinkA=0, shrinkB=2),
                 bbox=dict(boxstyle="round,pad=0.2",
-                          fc="white", ec=color, lw=0.5, alpha=0.9),
+                          fc="white", ec=color, lw=0.5, alpha=0.92),
             )
         any_drawn = True
 
-    # MLR/exact flat-line hint on the combined axis.
+    # MLR/exact flat-line hint. Place the caption at the top-left of the
+    # axes so it doesn't collide with the dense per-point labels along the
+    # flat segment.
     if ("mlr", "exact") in series:
         lanes = series[("mlr", "exact")]
-        x_last = lanes[-1][0]
         flat = float(np.nanmean(lanes[-1][1]))
         ax.axhline(flat, color=_COLORS[("mlr", "exact")],
                    alpha=0.35, linestyle=":")
-        ax.annotate(
-            "OLS invariant to uniform duplication",
-            xy=(x_last, flat), xytext=(-6, -16),
-            textcoords="offset points",
-            ha="right", va="top", fontsize=8,
+        ax.text(
+            0.015, 0.97,
+            f"OLS invariant to uniform duplication  (≈ {flat:.3f})",
+            transform=ax.transAxes, ha="left", va="top", fontsize=8,
             color=_COLORS[("mlr", "exact")],
+            bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                      ec=_COLORS[("mlr", "exact")], lw=0.5, alpha=0.9),
         )
 
     # Skipped markers on top.
