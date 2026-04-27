@@ -76,12 +76,13 @@ _COMBINED_LABEL = {
     ("tabpfn", "exact"): {"mod": 2, "dy": +18, "endpoints": True},
     ("tabpfn", "jitter"):{"mod": 3, "dy": -36, "endpoints": True},
 }
-# Per-model plot (one model, both modes) — only 2 lanes so we put labels
-# above the upper line and below the lower line. mod=0 + endpoints means
-# every other point gets a label, plus first and last unconditionally.
+# Per-model plot (one model, both modes) — every point gets a label.
+# Each line has a near/far dy so consecutive labels along the SAME line
+# zigzag and don't horizontally overlap; exact labels sit above the curve,
+# jitter below, so the two lines don't fight over the same vertical band.
 _PER_MODEL_LABEL = {
-    "exact":  {"mod": 0, "dy": +20, "endpoints": True},
-    "jitter": {"mod": 1, "dy": -22, "endpoints": True},
+    "exact":  {"dy_near": +18, "dy_far": +34},
+    "jitter": {"dy_near": -22, "dy_far": -38},
 }
 
 
@@ -244,7 +245,7 @@ def _plot_combined(ax, series, skips):
             for lanes in series.values()
         ])
         _apply_ylim_with_floor(ax, all_means)
-    ax.legend(loc="center right", frameon=True, framealpha=0.92,
+    ax.legend(loc="upper right", frameon=True, framealpha=0.92,
               edgecolor="#aaaaaa",
               handlelength=3.5,   # show enough line for dash/solid to be obvious
               handleheight=1.2,
@@ -284,18 +285,18 @@ def _plot_per_model(ax, model, series, skips):
                 label=f"{model.upper()}/{key[1]}")
         ax.fill_between(xs, means - stds, means + stds,
                         color=color, alpha=0.14)
-        cfg = _PER_MODEL_LABEL.get(key[1],
-                                   {"mod": 0, "dy": 16, "endpoints": True})
-        n = len(xs)
+        cfg = _PER_MODEL_LABEL.get(
+            key[1], {"dy_near": +18, "dy_far": +34}
+        )
         for i, (x, ym) in enumerate(zip(xs, means)):
             if not np.isfinite(ym):
                 continue
-            is_endpoint = cfg["endpoints"] and (i == 0 or i == n - 1)
-            if (i % 2) != cfg["mod"] and not is_endpoint:
-                continue
+            # Every point gets a label; alternate near/far within the line
+            # so adjacent labels don't sit on top of each other.
+            dy = cfg["dy_near"] if (i % 2 == 0) else cfg["dy_far"]
             ax.annotate(
                 f"({int(x)}, {ym:.3f})",
-                xy=(x, ym), xytext=(0, cfg["dy"]),
+                xy=(x, ym), xytext=(0, dy),
                 textcoords="offset points",
                 ha="center", va="center", fontsize=8, color=color,
                 arrowprops=dict(arrowstyle="-", color=color,
@@ -499,10 +500,12 @@ def plot_row_curves(
     # 3) per-model: one figure per model with exact+jitter overlaid. Tight
     # auto-scale on each model's own y-range so the jitter delta is visible
     # without being squashed by the cross-model range of the combined plot.
+    # Uses the full figsize (not the smaller single-panel size) so every
+    # data point's label has room.
     for model in ("mlr", "tabpfn"):
         if (model, "exact") not in series and (model, "jitter") not in series:
             continue
-        fig, ax = plt.subplots(figsize=single_figsize, dpi=dpi)
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
         _plot_per_model(ax, model, series, skips)
         fig.suptitle(
             f"{dataset}  —  {model.upper()} (exact + jitter)\n"

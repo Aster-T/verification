@@ -139,7 +139,7 @@ CONFIG = {
         "heatmap_cmap": "RdBu_r",
         "figsize_heatmap_single": (6, 5),
         "figsize_heatmap_triptych": (15, 5),
-        "figsize_curve": (14, 8),
+        "figsize_curve": (16, 9),
         "dpi": 150,
     },
 }
