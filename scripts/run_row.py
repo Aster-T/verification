@@ -57,10 +57,6 @@ def section(text: str, char: str = "=", width: int = 56) -> None:
 def main() -> int:
     local_args  = [a for d in LOCAL_DATASETS  for a in ("--dataset", d)]
     openml_args = [a for d in OPENML_DATASETS for a in ("--openml-preset", d)]
-    report_args = (
-        [a for d in LOCAL_DATASETS  for a in ("--dataset", d)] +
-        [a for d in OPENML_DATASETS for a in ("--openml-preset", d)]
-    )
 
     total = len(JITTER_SIGMAS) * len(TEST_SIZES)
     combo = 0
@@ -105,23 +101,19 @@ def main() -> int:
                 "-v",
             ])
 
-        print()
-        print(f"  ---- REPORT (sigma={sigma},  all test_sizes) ----")
-        run([
-            PY, "scripts/build_report.py",
-            *report_args,
-            "--jitter-sigma", sigma,
-            "-v",
-        ])
+    print()
+    print("=" * 80)
+    print("  Regenerating PNGs across all sigma subtrees (single pass)")
+    print("=" * 80)
+    run([PY, "scripts/rebuild_reports.py", "-v"])
 
     print()
     print("=================== ALL DONE ===================")
     print(f"Total combos: {total}  (sigma × test_size)")
     print(f"Seeds per combo: {SEEDS_CSV}  (N={len(SEEDS)})")
     print()
-    print("Reports (one per sigma; pick test_size from the in-page dropdown):")
-    for sigma in JITTER_SIGMAS:
-        print(f"  results/sigma_{sigma}/report.html")
+    print("View the unified report (live, on-demand) with:")
+    print("  python scripts/serve_report.py")
     return 0
 
 

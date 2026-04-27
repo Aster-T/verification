@@ -7,7 +7,8 @@ CLI 入口集合。每个脚本都是 `if __name__ == "__main__": main()` 的薄
 |---|---|
 | 数据准备 | [`export_datasets.py`](#export_datasetspy)、[`infer_meta.py`](#infer_metapy) |
 | 实验 | [`run_column_probe.py`](#run_column_probepy)、[`run_row_probe.py`](#run_row_probepy) |
-| 汇报 | [`build_report.py`](#build_reportpy) |
+| 一键扫一遍 | [`run_row.py`](#run_rowpy) |
+| 汇报 | [`rebuild_reports.py`](#rebuild_reportspy)（重生成 PNG）、[`serve_report.py`](#serve_reportpy)（起服务看图） |
 
 > LOO 不再有独立脚本 —— 用 `run_row_probe.py --split-mode loo`,逐点预测 CSV
 > 会自动落到 `results/<dataset>/row/predictions_*.csv`。
@@ -38,12 +39,14 @@ results/
       predictions_<combo>.csv     #   每条非 skip 记录配一份逐点预测
                                   #   <combo> = <model>_<split>_<mode>_k<k>_s<seed>
                                   #   列: id, y_true, y_pred, residual
-    viz/                          # build_report.py 的产物
+    viz/                          # rebuild_reports.py 的产物（PNG）
       side_by_side.png            #   MLR w / w⊗w / TabPFN col-attn 三联
       tabpfn_per_layer.png        #   TabPFN 每层 attention 网格
       row_curve.png               #   nRMSE vs k
-  report.html                     # build_report.py 生成的总报告
+      row_curve_<model>_<mode>.png #  4 个 facet 子图
 ```
+
+> 不再有静态 `report.html` —— 起 `scripts/serve_report.py` 直接看 live 报告。
 
 ### 共享的 OpenML 参数(所有实验/汇报脚本)
 
@@ -191,6 +194,8 @@ results/<dataset>/row/
   "r2": 0.3322, "rmse": 58.5, "mae": 46.2,
   "mape": 0.124,        // 相对误差 mean(|y_true-y_pred|/|y_true|),仅在 y_true!=0 上聚合;全 0 时为 null
   "mape_n": 89,         // 实际进入 mape 的样本数(y_true!=0 的行数)
+  // 仅在 ship-all / ship-selected 上出现:油船子集(船号 ∈ 9 艘)上的相对误差
+  "mape_tanker": 0.083, "mape_tanker_n": 12,
   "fit_sec": 0.001, "predict_sec": 0.0
 }
 ```
@@ -216,34 +221,62 @@ skip 条目(**只**在 fit / predict 实际抛异常时产生,不再有预判阈
 
 ---
 
-## `build_report.py`
+## `rebuild_reports.py`
 
-只吃 `results/` 下已有产物,渲染可视化 + HTML。不跑训练。
+扫一遍 `results/sigma_*/` 子目录，对每个有 `row/metrics.jsonl` 或
+`column/mlr.npz` 的位置重新生成 viz/ 下的 PNG。**不**跑模型，**不**生成 HTML。
+改了 `src/viz/curves.py` / `src/viz/heatmap.py` 想刷图就跑这个。
 
 | 参数 | 默认 | 含义 |
 |---|---|---|
-| `--dataset NAME` | - | 要渲染哪些,可重复 |
-| `--openml-*` | - | 共享参数(只取名字,不重新 fetch) |
 | `--results-root PATH` | `results/` | 读产物的根 |
-| `--out PATH` | `results/report.html` | 输出 HTML 路径 |
 | `-v` | off | 详细日志 |
 
 ```bash
-python scripts/build_report.py --dataset diabetes --dataset synth_linear
-python scripts/build_report.py --openml-all
+python scripts/rebuild_reports.py
 ```
 
-### 产物
+---
 
-```
-results/<dataset>/viz/side_by_side.png       # 列探针三联图
-results/<dataset>/viz/tabpfn_per_layer.png   # TabPFN 每层 attn(无 TabPFN 时缺失)
-results/<dataset>/viz/row_curve.png          # nRMSE vs k 曲线
-results/report.html                          # 自包含 HTML,内嵌所有图片 + 聚合表格
+## `serve_report.py`
+
+起一个 HTTP server，提供单页报告：可筛选（σ / test_size / dataset / 图类型）、
+可"加入对比"挑图横向并排、表格按需展开懒加载。**不**写任何静态文件。
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `--port` | `8000` | 端口 |
+| `--bind` | `127.0.0.1` | 绑定地址。`0.0.0.0` = 暴露到 LAN |
+| `--results-root PATH` | `results/` | 报告读取的根目录 |
+| `-v` | off | 详细日志 |
+
+```bash
+python scripts/serve_report.py
+# 然后浏览器打开 http://localhost:8000/
 ```
 
-HTML 表格列:`split / model / mode / k / n_ctx / n_query / n_folds /
-n_features / nRMSE / R² / RMSE / MAE / skipped`。
+Endpoints（前端会自己用，调试时可手动访问）：
+
+| 路径 | 说明 |
+|---|---|
+| `GET /` | 单页前端（HTML + 内联 CSS/JS） |
+| `GET /manifest.json` | 启动时扫一遍 `results/` 得到的所有可用 (σ, test_size, dataset, chart) 元组 |
+| `GET /results/<rel>` | 透传 `results/` 下的文件（PNG） |
+| `GET /table?jsonl=<rel>` | 按需聚合一份 `metrics.jsonl`，返回每 (split, model, mode, k) 一行的 JSON |
+
+---
+
+## `run_row.py`
+
+一次性扫一遍所有 (σ, test_size) 组合，跑 LOO + proportional + 自动重生成
+PNG。配置在脚本顶部（`FRESH` / `LOCAL_DATASETS` / `OPENML_DATASETS` /
+`JITTER_SIGMAS` / `TEST_SIZES` / `SEEDS` / `K_LIST`），无 CLI 参数。
+
+```bash
+python scripts/run_row.py
+# 跑完后：
+python scripts/serve_report.py
+```
 
 ---
 
@@ -259,8 +292,9 @@ $PY scripts/infer_meta.py datasets/ship/data.csv
 $PY scripts/run_column_probe.py --dataset diabetes --dataset ship
 $PY scripts/run_row_probe.py    --dataset diabetes --dataset ship --fresh
 
-# 3. 报告
-$PY scripts/build_report.py     --dataset diabetes --dataset ship
+# 3. 把 PNG 刷一遍 + 起服务看
+$PY scripts/rebuild_reports.py
+$PY scripts/serve_report.py
 ```
 
-打开 [`results/report.html`](../results/report.html) 看结果。
+浏览器打开 http://localhost:8000/ 看结果。

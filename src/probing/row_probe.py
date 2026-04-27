@@ -30,6 +30,9 @@ OUTPUT LAYOUT (for a given dataset, under `row_dir`):
      mape_n = number of query rows that contributed to mape (i.e.
               y_true != 0). For datasets with zero targets (e.g.
               forest-fires), mape_n < n_query.
+     mape_tanker / mape_tanker_n: same definition but restricted to
+              the 9 tanker vessels (船号 ∈ _TANKER_IDS). Present only
+              for `ship-all` and `ship-selected` records.
      n_ctx / n_query describe a SINGLE model invocation:
        proportional:  n_ctx = k×n_tr,  n_query = n_te,  n_folds = 1
        loo:           n_ctx = k×(N-1), n_query = 1,     n_folds = N
@@ -63,6 +66,34 @@ from src.utils.seed import set_seed
 logger = logging.getLogger(__name__)
 
 VALID_SPLIT_MODES = ("proportional", "loo")
+
+# Datasets where we additionally compute MAPE restricted to tanker rows.
+# `ship-tanker` is excluded because it already contains only tankers
+# (mape_tanker would just equal mape).
+_TANKER_DATASETS = frozenset({"ship-all", "ship-selected"})
+_SHIP_ID_COL = "船号"
+_TANKER_IDS = frozenset({
+    "G1099", "G1107", "G1113", "G1132", "G1171",
+    "G1186", "G1194", "G1198", "GTEST",
+})
+
+
+def _tanker_mask(
+    dataset: str,
+    feature_names: list[str],
+    X_query: np.ndarray,
+) -> np.ndarray | None:
+    """Boolean mask over `X_query` rows belonging to the 9 tanker ships.
+    Returns None when the dataset is not in `_TANKER_DATASETS` or the ship
+    column is not in `feature_names` — caller treats None as 'skip the
+    tanker metric'."""
+    if dataset not in _TANKER_DATASETS:
+        return None
+    if _SHIP_ID_COL not in feature_names:
+        return None
+    j = feature_names.index(_SHIP_ID_COL)
+    col = X_query[:, j]
+    return np.asarray([str(v) in _TANKER_IDS for v in col], dtype=bool)
 
 
 def duplicate_context(
@@ -150,14 +181,24 @@ def duplicate_context(
     return X_rep.astype(np.float64, copy=False), y_out
 
 
-def _metric_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+def _metric_row(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    tanker_mask: np.ndarray | None = None,
+) -> dict:
     """Regression metrics, with nRMSE = RMSE/std(y_true). nrmse is None when
     std=0; r² is NaN when n<2 or std=0.
 
     mape = mean(|y_true - y_pred| / |y_true|) over rows where y_true != 0.
     Rows with y_true == 0 are excluded (their per-point relative error is
     undefined). mape is None when every y_true is 0; mape_n reports how
-    many rows contributed."""
+    many rows contributed.
+
+    When `tanker_mask` is provided (boolean ndarray, same length as y_true),
+    additionally compute the same MAPE restricted to rows where the mask is
+    True AND y_true != 0, returned as `mape_tanker` / `mape_tanker_n`. Used
+    by ship-* datasets to track relative error on the 9 tanker vessels
+    separately from the rest of the fleet."""
     y_true = np.asarray(y_true, dtype=np.float64).ravel()
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     mse = float(mean_squared_error(y_true, y_pred))
@@ -171,7 +212,7 @@ def _metric_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         float(np.mean(np.abs((y_true[nz] - y_pred[nz]) / y_true[nz])))
         if mape_n > 0 else None
     )
-    return {
+    out = {
         "nrmse": nrmse,
         "r2": r2,
         "rmse": rmse,
@@ -180,6 +221,20 @@ def _metric_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         "mape_n": mape_n,
         "y_query_std": y_std,
     }
+    if tanker_mask is not None:
+        m = np.asarray(tanker_mask, dtype=bool).ravel()
+        if m.shape[0] != y_true.shape[0]:
+            raise ValueError(
+                f"tanker_mask length {m.shape[0]} != y_true length {y_true.shape[0]}"
+            )
+        nz_t = nz & m
+        mape_tanker_n = int(nz_t.sum())
+        out["mape_tanker"] = (
+            float(np.mean(np.abs((y_true[nz_t] - y_pred[nz_t]) / y_true[nz_t])))
+            if mape_tanker_n > 0 else None
+        )
+        out["mape_tanker_n"] = mape_tanker_n
+    return out
 
 
 def _fit_predict_mlr(X_ctx, y_ctx, X_te, is_nominal):
@@ -246,19 +301,21 @@ def _run_proportional(
     )
     for seed in seeds:
         set_seed(seed)
-        X, y, _names, is_nominal = load_dataset_full(dataset, seed)
+        X, y, feature_names, is_nominal = load_dataset_full(dataset, seed)
         X_tr, X_te, y_tr, y_te = train_test_split(
             X, y, test_size=effective_test_size, random_state=seed,
         )
         n_tr_original = X_tr.shape[0]
         n_query = X_te.shape[0]
         n_features = X_tr.shape[1]
+        tanker_mask = _tanker_mask(dataset, feature_names, X_te)
         logger.info(
             "split dataset=%s seed=%d test_size=%g n_train=%d n_test=%d "
-            "n_features=%d n_nominal=%d",
+            "n_features=%d n_nominal=%d n_tanker_in_query=%s",
             dataset, seed, effective_test_size,
             n_tr_original, n_query, n_features,
             sum(is_nominal) if is_nominal is not None else 0,
+            int(tanker_mask.sum()) if tanker_mask is not None else "n/a",
         )
 
         for k in k_list:
@@ -321,7 +378,8 @@ def _run_proportional(
                         )
                         continue
 
-                    metrics = _metric_row(y_te, y_pred_arr)
+                    metrics = _metric_row(y_te, y_pred_arr,
+                                          tanker_mask=tanker_mask)
                     rec = {
                         **base_rec,
                         "y_query_std": metrics["y_query_std"],
@@ -331,6 +389,9 @@ def _run_proportional(
                         "fit_sec": float(fit_sec),
                         "predict_sec": float(predict_sec),
                     }
+                    if "mape_tanker" in metrics:
+                        rec["mape_tanker"] = metrics["mape_tanker"]
+                        rec["mape_tanker_n"] = metrics["mape_tanker_n"]
                     write_jsonl(jsonl_path, [rec], append=True)
 
                     _write_predictions_csv(
@@ -360,15 +421,17 @@ def _run_loo(
 ) -> None:
     for seed in seeds:
         set_seed(seed)
-        X, y, _names, is_nominal = load_dataset_full(dataset, seed)
+        X, y, feature_names, is_nominal = load_dataset_full(dataset, seed)
         n = X.shape[0]
         n_features = X.shape[1]
         all_idx = np.arange(n)
+        tanker_mask = _tanker_mask(dataset, feature_names, X)
         logger.info(
             "split dataset=%s seed=%d split_mode=loo n_folds=%d "
-            "n_features=%d n_nominal=%d",
+            "n_features=%d n_nominal=%d n_tanker_in_query=%s",
             dataset, seed, n, n_features,
             sum(is_nominal) if is_nominal is not None else 0,
+            int(tanker_mask.sum()) if tanker_mask is not None else "n/a",
         )
 
         for k in k_list:
@@ -444,7 +507,8 @@ def _run_loo(
                         )
                         continue
 
-                    metrics = _metric_row(y_true_all, y_pred_all)
+                    metrics = _metric_row(y_true_all, y_pred_all,
+                                          tanker_mask=tanker_mask)
                     rec = {
                         **base_rec,
                         "y_query_std": metrics["y_query_std"],
@@ -454,6 +518,9 @@ def _run_loo(
                         "fit_sec": float(fit_sec_total),
                         "predict_sec": float(predict_sec_total),
                     }
+                    if "mape_tanker" in metrics:
+                        rec["mape_tanker"] = metrics["mape_tanker"]
+                        rec["mape_tanker_n"] = metrics["mape_tanker_n"]
                     write_jsonl(jsonl_path, [rec], append=True)
 
                     _write_predictions_csv(
