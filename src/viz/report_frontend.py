@@ -94,15 +94,37 @@ FRONTEND_HTML = r"""<!doctype html>
   button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   button.primary:hover { background: var(--accent-hover); }
 
-  /* ---------- compare panel (sticky) ---------- */
+  /* ---------- two-column layout ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 380px;
+    gap: 1.25rem;
+    align-items: start;
+  }
+  .layout-main { min-width: 0; }   /* let the gallery shrink, not overflow */
+  .layout-side {
+    position: sticky;
+    top: 0.75rem;
+    max-height: calc(100vh - 1.5rem);
+    overflow-y: auto;
+    /* Subtle scrollbar so the rail looks calm. */
+    scrollbar-width: thin;
+  }
+  @media (max-width: 1100px) {
+    /* Below this width the right rail eats too much space — collapse to
+       single column and let the compare panel stack at the top. */
+    .layout { grid-template-columns: 1fr; }
+    .layout-side { position: static; max-height: none; }
+  }
+
+  /* ---------- compare panel (right rail) ---------- */
   .compare-panel {
-    position: sticky; top: 0; z-index: 50;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 0.6rem;
     box-shadow: var(--shadow);
-    margin-bottom: 1.25rem;
     padding: 0.6rem 0.9rem 0.85rem;
+    margin-bottom: 0;
   }
   .compare-header {
     display: flex; justify-content: space-between; align-items: center;
@@ -442,45 +464,51 @@ FRONTEND_HTML = r"""<!doctype html>
     </div>
   </header>
 
-  <section id="compare" class="compare-panel">
-    <div class="compare-header">
-      <h2>Compare<span class="pill" id="compare-count">0</span></h2>
-      <button id="compare-clear" disabled>Clear all</button>
-    </div>
-    <div class="compare-grid" id="compare-grid">
-      <div class="empty-hint">Click "+ Compare" on any image below to pin it here, side by side.</div>
-    </div>
-  </section>
+  <div class="layout">
+    <main class="layout-main">
+      <section class="filters" id="filters">
+        <div class="filters-toolbar">
+          <h2>Filters</h2>
+          <div class="summary" id="filter-summary">…</div>
+        </div>
+        <div class="filter-grid" id="filter-grid"></div>
+      </section>
 
-  <section class="filters" id="filters">
-    <div class="filters-toolbar">
-      <h2>Filters</h2>
-      <div class="summary" id="filter-summary">…</div>
-    </div>
-    <div class="filter-grid" id="filter-grid"></div>
-  </section>
+      <section class="macro-section" id="macro-section">
+        <div class="head">
+          <h2>宏指标</h2>
+          <span class="hint">每个 (σ · dataset) 一张卡，按当前筛选下的全部记录聚合。</span>
+        </div>
+        <div class="macro-cards" id="macro-cards"></div>
+      </section>
 
-  <section class="macro-section" id="macro-section">
-    <div class="head">
-      <h2>宏指标</h2>
-      <span class="hint">每个 (σ · dataset) 一张卡，按当前筛选下的全部记录聚合。</span>
-    </div>
-    <div class="macro-cards" id="macro-cards"></div>
-  </section>
+      <section id="gallery" class="gallery"></section>
 
-  <section id="gallery" class="gallery"></section>
+      <section class="tables-section">
+        <h2>Data tables</h2>
+        <p class="hint">展开查看每个 (dataset · σ · test_size) 切片的聚合指标表。表数据按需加载。</p>
+        <div id="tables"></div>
+      </section>
+    </main>
+
+    <aside class="layout-side">
+      <section id="compare" class="compare-panel">
+        <div class="compare-header">
+          <h2>Compare<span class="pill" id="compare-count">0</span></h2>
+          <button id="compare-clear" disabled>Clear all</button>
+        </div>
+        <div class="compare-grid" id="compare-grid">
+          <div class="empty-hint">Click "+ Compare" on any image to the left to pin it here.</div>
+        </div>
+      </section>
+    </aside>
+  </div>
 
   <div class="lightbox-backdrop" id="lightbox" aria-hidden="true" role="dialog">
     <button class="lightbox-close" type="button" id="lightbox-close">Close (Esc)</button>
     <img alt="">
     <div class="lightbox-caption" id="lightbox-caption"></div>
   </div>
-
-  <section class="tables-section">
-    <h2>Data tables</h2>
-    <p class="hint">展开查看每个 (dataset · σ · test_size) 切片的聚合指标表。表数据按需加载。</p>
-    <div id="tables"></div>
-  </section>
 
   <footer>scripts/serve_report.py · live from results/</footer>
 
