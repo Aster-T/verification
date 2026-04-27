@@ -13,17 +13,28 @@ SPLIT MODES:
 For MLR in "exact" mode the R² (hence nRMSE) is mathematically independent
 of k — OLS on a uniformly replicated dataset returns the same coefficients.
 
-PRIMARY METRIC: nRMSE = RMSE / std(y_query)
+PRIMARY METRIC: nRMSE = RMSE / std(y_full)
   - Dimensionless, scale-invariant -> comparable across datasets.
-  - 0 = perfect; 1 ≈ predicting the query mean; >1 = worse than that baseline.
-  - Equals sqrt(1 - R²) exactly on the same query set.
-  - Returns null when std(y_query) == 0 (degenerate constant target).
+  - 0 = perfect; ~1 = predicting the dataset-mean baseline; >1 = worse.
+  - Denominator is std over the FULL loaded target — not the held-out
+    query — so the metric stays stable across seeds in proportional
+    mode (small test sets otherwise make std(y_query) jitter and so
+    nRMSE jitters with it). For LOO the query equals the full set, so
+    the two coincide.
+  - Returns null when std(y_full) == 0 (degenerate constant target).
+  - R² intentionally still uses std(y_query) — it's the variance-
+    explained ratio on the query set itself, an intrinsic statistic.
 
 OUTPUT LAYOUT (for a given dataset, under `row_dir`):
   metrics.jsonl
      One record per (model, split_mode, k, mode, seed). Schema:
        dataset, model, split_mode, k, mode, seed,
-       n_ctx, n_query, n_folds, n_features, y_query_std,
+       n_ctx, n_query, n_folds, n_features,
+       y_query_std,        # std over the actual query rows (diagnostic)
+       y_denom_std,        # std actually used as the nRMSE denominator —
+                           # set to std(y_full) so nRMSE is stable across
+                           # seeds (it doesn't fluctuate with whichever
+                           # rows happen to land in the test split).
        nrmse, r2, rmse, mae, mape, mape_n, fit_sec, predict_sec
      mape  = mean(|y_true - y_pred| / |y_true|), restricted to
              rows where y_true != 0. null when every y_true is 0.
@@ -184,10 +195,23 @@ def duplicate_context(
 def _metric_row(
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    *,
+    denom_std: float | None = None,
     tanker_mask: np.ndarray | None = None,
 ) -> dict:
-    """Regression metrics, with nRMSE = RMSE/std(y_true). nrmse is None when
-    std=0; r² is NaN when n<2 or std=0.
+    """Regression metrics. nrmse = RMSE / `denom_std` when provided, else
+    RMSE / std(y_true). When `denom_std == 0` or None and std(y_true) == 0,
+    nrmse is None; r² is NaN when n<2 or std(y_true) == 0.
+
+    Why `denom_std` exists: in proportional split mode std(y_query) is
+    computed over a small held-out test set and fluctuates seed-to-seed,
+    making nRMSE less stable as a cross-(seed, k) summary. Caller passes
+    std(y_full) — the standard deviation of the loaded dataset's full
+    target — so nRMSE is normalised by a stable per-(dataset, seed)
+    constant. R² intentionally still uses std(y_true): it's the variance-
+    explained ratio on the query set itself, not a normalisation choice.
+    For LOO the query IS the full dataset, so passing std(y_full) is a
+    no-op equality.
 
     mape = mean(|y_true - y_pred| / |y_true|) over rows where y_true != 0.
     Rows with y_true == 0 are excluded (their per-point relative error is
@@ -203,9 +227,14 @@ def _metric_row(
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     mse = float(mean_squared_error(y_true, y_pred))
     rmse = float(np.sqrt(mse))
-    y_std = float(np.std(y_true, ddof=0))
-    nrmse: float | None = float(rmse / y_std) if y_std > 0 else None
-    r2 = float(r2_score(y_true, y_pred)) if (y_true.size >= 2 and y_std > 0) else float("nan")
+    y_query_std = float(np.std(y_true, ddof=0))
+    denom = denom_std if denom_std is not None else y_query_std
+    nrmse: float | None = float(rmse / denom) if denom > 0 else None
+    r2 = (
+        float(r2_score(y_true, y_pred))
+        if (y_true.size >= 2 and y_query_std > 0)
+        else float("nan")
+    )
     nz = y_true != 0
     mape_n = int(nz.sum())
     mape: float | None = (
@@ -219,7 +248,11 @@ def _metric_row(
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "mape": mape,
         "mape_n": mape_n,
-        "y_query_std": y_std,
+        "y_query_std": y_query_std,
+        # Actual denominator used for nRMSE. Equals y_query_std when caller
+        # didn't pass denom_std (legacy path) and equals std(y_full) for the
+        # row probe today.
+        "y_denom_std": float(denom),
     }
     if tanker_mask is not None:
         m = np.asarray(tanker_mask, dtype=bool).ravel()
@@ -315,6 +348,10 @@ def _run_proportional(
     for seed in seeds:
         set_seed(seed)
         X, y, feature_names, is_nominal = load_dataset_full(dataset, seed)
+        # std over the full loaded target — stable per (dataset, seed) and
+        # used as the nRMSE denominator so the metric doesn't fluctuate with
+        # which rows happen to land in the test split.
+        y_full_std = float(np.std(np.asarray(y, dtype=np.float64), ddof=0))
         X_tr, X_te, y_tr, y_te = train_test_split(
             X, y, test_size=effective_test_size, random_state=seed,
         )
@@ -324,11 +361,12 @@ def _run_proportional(
         tanker_mask = _tanker_mask(dataset, feature_names, X_te)
         logger.info(
             "split dataset=%s seed=%d test_size=%g n_train=%d n_test=%d "
-            "n_features=%d n_nominal=%d n_tanker_in_query=%s",
+            "n_features=%d n_nominal=%d n_tanker_in_query=%s y_full_std=%.4g",
             dataset, seed, effective_test_size,
             n_tr_original, n_query, n_features,
             sum(is_nominal) if is_nominal is not None else 0,
             int(tanker_mask.sum()) if tanker_mask is not None else "n/a",
+            y_full_std,
         )
 
         for k in k_list:
@@ -402,11 +440,15 @@ def _run_proportional(
                         )
                         continue
 
-                    metrics = _metric_row(y_te, y_pred_arr,
-                                          tanker_mask=tanker_mask)
+                    metrics = _metric_row(
+                        y_te, y_pred_arr,
+                        denom_std=y_full_std,
+                        tanker_mask=tanker_mask,
+                    )
                     rec = {
                         **base_rec,
                         "y_query_std": metrics["y_query_std"],
+                        "y_denom_std": metrics["y_denom_std"],
                         "nrmse": metrics["nrmse"], "r2": metrics["r2"],
                         "rmse": metrics["rmse"], "mae": metrics["mae"],
                         "mape": metrics["mape"], "mape_n": metrics["mape_n"],
@@ -460,13 +502,19 @@ def _run_loo(
         n = X.shape[0]
         n_features = X.shape[1]
         all_idx = np.arange(n)
+        # std of the full target — for LOO this equals std(y_query) by
+        # construction (every row is queried once), but we still pass it
+        # explicitly so the jsonl carries the same y_denom_std field as
+        # proportional records.
+        y_full_std = float(np.std(np.asarray(y, dtype=np.float64), ddof=0))
         tanker_mask = _tanker_mask(dataset, feature_names, X)
         logger.info(
             "split dataset=%s seed=%d split_mode=loo n_folds=%d "
-            "n_features=%d n_nominal=%d n_tanker_in_query=%s",
+            "n_features=%d n_nominal=%d n_tanker_in_query=%s y_full_std=%.4g",
             dataset, seed, n, n_features,
             sum(is_nominal) if is_nominal is not None else 0,
             int(tanker_mask.sum()) if tanker_mask is not None else "n/a",
+            y_full_std,
         )
 
         for k in k_list:
@@ -548,11 +596,15 @@ def _run_loo(
                         )
                         continue
 
-                    metrics = _metric_row(y_true_all, y_pred_all,
-                                          tanker_mask=tanker_mask)
+                    metrics = _metric_row(
+                        y_true_all, y_pred_all,
+                        denom_std=y_full_std,
+                        tanker_mask=tanker_mask,
+                    )
                     rec = {
                         **base_rec,
                         "y_query_std": metrics["y_query_std"],
+                        "y_denom_std": metrics["y_denom_std"],
                         "nrmse": metrics["nrmse"], "r2": metrics["r2"],
                         "rmse": metrics["rmse"], "mae": metrics["mae"],
                         "mape": metrics["mape"], "mape_n": metrics["mape_n"],

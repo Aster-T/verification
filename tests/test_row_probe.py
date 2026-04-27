@@ -83,16 +83,28 @@ def test_new_schema_fields_present_and_csv_written(tmp_path):
     assert abs(resid - (yt - yp)) < 1e-9
 
 
-def test_nrmse_relationship_to_r2(tmp_path):
-    """nrmse == sqrt(1 - r2) on the same query set (when r2 <= 1)."""
+def test_nrmse_uses_full_y_std_not_query(tmp_path):
+    """nRMSE = RMSE / std(y_full), not RMSE / std(y_query). The identity
+    nrmse == sqrt(1 - r2) only held when both used std(y_query); now that
+    nrmse divides by std(y_full) (recorded as y_denom_std), the schema
+    advertises that explicitly via y_denom_std and the math should match.
+    """
     run_row_probe(
         dataset="synth_linear", row_dir=tmp_path,
         k_list=[1], modes=["exact"], seeds=[0],
         include_tabpfn=False,
     )
     rec = _records(tmp_path)[0]
-    expected = float(np.sqrt(max(0.0, 1.0 - rec["r2"])))
-    assert abs(rec["nrmse"] - expected) < 1e-9, (rec["nrmse"], expected)
+    # nrmse computed against y_denom_std, not y_query_std.
+    assert abs(rec["nrmse"] - rec["rmse"] / rec["y_denom_std"]) < 1e-9, rec
+    # y_denom_std is std over the loaded full target — independent of
+    # the train/test split. y_query_std differs (it's computed on the
+    # held-out test subset only).
+    assert rec["y_denom_std"] != rec["y_query_std"], rec
+    # sqrt(1 - r2) still relates to RMSE via the QUERY std; verify the
+    # invariant with the right denominator.
+    expected_query_nrmse = float(np.sqrt(max(0.0, 1.0 - rec["r2"])))
+    assert abs(rec["rmse"] / rec["y_query_std"] - expected_query_nrmse) < 1e-9
 
 
 def test_jitter_rows_have_noise(tmp_path):
