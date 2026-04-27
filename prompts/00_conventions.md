@@ -25,7 +25,7 @@ verification/
 ## 必须遵守
 
 1. **不修改 `third-party/` 下任何文件**。需要 hook tabpfn 行为时，只能在 `src/` 用 monkey-patch / 上下文管理器。
-2. **路径统一用 `pathlib.Path`**。不允许字符串拼路径，不允许写死 `D:\` 或 `/data1/`。
+2. **路径统一用 `pathlib.Path`**。不允许字符串拼路径，不允许写死任何机器特定的绝对路径（无论 Windows 盘符还是 POSIX 挂载点）。
 3. **随机种子统一走 `src/utils/seed.py` 的 `set_seed(seed)`**，一次性设定 numpy / torch / python random / cuda。
 4. **配置集中在 `src/configs.py`**，dict-based，不使用 yaml / hydra。所有超参必须可从 CONFIG 里查到，禁止散落在函数默认值里。
 5. **结果文件**：

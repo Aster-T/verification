@@ -54,7 +54,7 @@ Rationale: Low-cost addition that keeps default behaviour (both models) and
 ## 2026-04-22 Phase 4
 Decision: Test uses a repo-local tmp directory (.pytest_cache/tmp/case-*)
   instead of pytest's default tmp_path.
-Context: pytest's make_numbered_dir raises `PermissionError: [WinError 5]` on
-  `os.scandir('%LOCALAPPDATA%/Temp/pytest-of-ryunen')` on this Windows box.
+Context: pytest's make_numbered_dir raised a PermissionError on a Windows
+  workstation when trying to access the user-temp directory.
 Rationale: Redirect scoped to tests/test_row_probe.py only; keeps the rest of
   the test suite using the standard fixture.

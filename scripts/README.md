@@ -17,7 +17,7 @@ CLI 入口集合。每个脚本都是 `if __name__ == "__main__": main()` 的薄
 
 ## 约定
 
-- **Python 解释器**:必须用 `D:/miniconda3/envs/vc/python.exe`
+- **Python 解释器**:用项目自带环境的 `python`(必须能 import `tabpfn`,即指向 `pip install -e third-party/TabPFN` 安装的解释器)
 - **运行目录**:在项目根下运行
 - **`-v` / `--verbose`**:所有脚本都接受,打开后级别从 WARNING 变为 INFO
 - **数据集 3 种来源**,都能通过 `--dataset <name>` 引用:
@@ -283,7 +283,7 @@ python scripts/serve_report.py
 ## 端到端典型 pipeline
 
 ```bash
-PY=D:/miniconda3/envs/vc/python.exe
+PY=python   # 或绝对路径,指向你装了 tabpfn (editable) 的 conda env 的 python
 
 # 1. 自备数据集(可选)
 $PY scripts/infer_meta.py datasets/ship/data.csv
