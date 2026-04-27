@@ -60,7 +60,7 @@ from sklearn.model_selection import train_test_split
 from src.configs import CONFIG, get_dataset_cfg, get_device
 from src.data.loaders import load_dataset_full
 from src.models.mlr_wrapper import MLRWithW
-from src.utils.io import ensure_dir, write_jsonl
+from src.utils.io import ensure_dir, existing_keys_jsonl, write_jsonl
 from src.utils.seed import set_seed
 
 logger = logging.getLogger(__name__)
@@ -299,6 +299,19 @@ def _run_proportional(
         test_size if test_size is not None
         else float(get_dataset_cfg(dataset).get("test_size", 0.2))
     )
+    # Resume: skip (model, k, mode, seed) combos already present in jsonl.
+    # Caller controls "fresh start" by clearing the file before invocation
+    # (run_row_probe.py: --fresh wipes row_dir; without it we resume).
+    done_keys = existing_keys_jsonl(
+        jsonl_path,
+        lambda r: (r["model"], r["k"], r["mode"], r["seed"]),
+    )
+    if done_keys:
+        logger.info(
+            "resume dataset=%s split_mode=proportional: %d combos already in %s, will skip them",
+            dataset, len(done_keys), jsonl_path.name,
+        )
+
     for seed in seeds:
         set_seed(seed)
         X, y, feature_names, is_nominal = load_dataset_full(dataset, seed)
@@ -321,6 +334,17 @@ def _run_proportional(
         for k in k_list:
             n_ctx = k * n_tr_original
             for mode in modes:
+                # Skip duplicate_context entirely if every model is already done.
+                todo_models = [
+                    m for m in models
+                    if (m, int(k), mode, int(seed)) not in done_keys
+                ]
+                if not todo_models:
+                    logger.info(
+                        "skip dataset=%s k=%d mode=%s seed=%d: all models already done",
+                        dataset, k, mode, seed,
+                    )
+                    continue
                 rng = np.random.default_rng(np.random.SeedSequence(
                     entropy=[seed, k, 0 if mode == "exact" else 1],
                 ))
@@ -330,7 +354,7 @@ def _run_proportional(
                     is_nominal=is_nominal,
                 )
 
-                for model in models:
+                for model in todo_models:
                     base_rec = {
                         "dataset": dataset,
                         "model": model,
@@ -419,6 +443,17 @@ def _run_loo(
     jitter_sigma: float | None = None,
     tabpfn_numeric: bool = False,
 ) -> None:
+    # Resume: skip (model, k, mode, seed) already done.
+    done_keys = existing_keys_jsonl(
+        jsonl_path,
+        lambda r: (r["model"], r["k"], r["mode"], r["seed"]),
+    )
+    if done_keys:
+        logger.info(
+            "resume dataset=%s split_mode=loo: %d combos already in %s, will skip them",
+            dataset, len(done_keys), jsonl_path.name,
+        )
+
     for seed in seeds:
         set_seed(seed)
         X, y, feature_names, is_nominal = load_dataset_full(dataset, seed)
@@ -438,6 +473,12 @@ def _run_loo(
             n_ctx = k * (n - 1)
             for mode in modes:
                 for model in models:
+                    if (model, int(k), mode, int(seed)) in done_keys:
+                        logger.info(
+                            "skip %s (LOO) dataset=%s k=%d mode=%s seed=%d: already done",
+                            model, dataset, k, mode, seed,
+                        )
+                        continue
                     base_rec = {
                         "dataset": dataset, "model": model,
                         "split_mode": "loo",
@@ -562,8 +603,13 @@ def run_row_probe(
         CONFIG["row_probe"]["jitter_sigma"] (usually 1e-6). 0 makes jitter
         numerically identical to exact.
 
-    Existing files are APPENDED/overwritten in place; the caller (CLI) is
-    responsible for clearing the dir ahead of time to enforce --fresh.
+    RESUME / FRESH semantics:
+      The runners skip any (model, k, mode, seed) combo whose record already
+      lives in `metrics.jsonl` (read once at startup). To force a full re-run
+      the caller must clear `row_dir` first — that's exactly what `--fresh`
+      does on the CLI side. Without --fresh, this function resumes from where
+      a previous invocation left off (or was interrupted), and skipped combos
+      keep their existing CSVs.
     """
     if split_mode not in VALID_SPLIT_MODES:
         raise ValueError(
