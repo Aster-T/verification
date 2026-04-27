@@ -33,6 +33,8 @@ from src.utils.io import read_jsonl
 _CHART_FILES: list[tuple[str, str, str]] = [
     # (id, label, filename)
     ("row_curve", "Row curve · combined", "row_curve.png"),
+    ("row_curve_mlr", "Row curve · MLR (exact + jitter)", "row_curve_mlr.png"),
+    ("row_curve_tabpfn", "Row curve · TabPFN (exact + jitter)", "row_curve_tabpfn.png"),
     ("row_curve_mlr_exact", "Row curve · MLR/exact", "row_curve_mlr_exact.png"),
     ("row_curve_mlr_jitter", "Row curve · MLR/jitter", "row_curve_mlr_jitter.png"),
     ("row_curve_tabpfn_exact", "Row curve · TabPFN/exact", "row_curve_tabpfn_exact.png"),

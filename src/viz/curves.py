@@ -2,13 +2,15 @@
 Row-probe curves for one dataset.
 
 Reads `results/<dataset>/row/metrics.jsonl`, groups by (model, mode),
-aggregates across seeds, and writes FIVE PNGs into `out_dir`:
+aggregates across seeds, and writes SEVEN PNGs into `out_dir`:
 
   row_curve.png                           all 4 lines combined (shared y-axis)
   row_curve_mlr_exact.png                 single-line, auto-scaled
   row_curve_mlr_jitter.png
   row_curve_tabpfn_exact.png
   row_curve_tabpfn_jitter.png
+  row_curve_mlr.png                       MLR exact + jitter overlaid
+  row_curve_tabpfn.png                    TabPFN exact + jitter overlaid
 
 The combined plot keeps all lines on one set of axes so cross-model
 comparison at a glance is possible (at the cost of the bigger model
@@ -73,6 +75,13 @@ _COMBINED_LABEL = {
     ("mlr", "jitter"):   {"mod": 1, "dy": -22, "endpoints": True},
     ("tabpfn", "exact"): {"mod": 2, "dy": +18, "endpoints": True},
     ("tabpfn", "jitter"):{"mod": 3, "dy": -36, "endpoints": True},
+}
+# Per-model plot (one model, both modes) — only 2 lanes so we put labels
+# above the upper line and below the lower line. mod=0 + endpoints means
+# every other point gets a label, plus first and last unconditionally.
+_PER_MODEL_LABEL = {
+    "exact":  {"mod": 0, "dy": +20, "endpoints": True},
+    "jitter": {"mod": 1, "dy": -22, "endpoints": True},
 }
 
 
@@ -245,6 +254,108 @@ def _plot_combined(ax, series, skips):
 
 
 # --------------------------------------------------------------------------
+# Per-model plot (one model, exact + jitter on the same axes)
+# --------------------------------------------------------------------------
+
+def _plot_per_model(ax, model, series, skips):
+    """Render exact + jitter for ONE model on shared axes.
+
+    Auto-scales tight on this model's data so the exact-vs-jitter delta is
+    visible without the cross-model y-range that the combined plot inherits.
+    Same color/style/marker conventions as the combined view (line solid for
+    jitter, dashed for exact; circles vs squares).
+    """
+    relevant = [(model, "exact"), (model, "jitter")]
+    drawn_keys: list[tuple[str, str]] = []
+    for key in relevant:
+        if key not in series:
+            continue
+        lanes = series[key]
+        xs = np.array([t[0] for t in lanes])
+        means = np.array([np.nanmean(t[1]) for t in lanes])
+        stds = np.array([np.nanstd(t[1]) if len(t[1]) > 1 else 0.0
+                         for t in lanes])
+        color = _COLORS.get(key, "gray")
+        style = _STYLES.get(key, "-")
+        marker = _MARKERS.get(key, "o")
+        ax.plot(xs, means, style, color=color, linewidth=1.8,
+                marker=marker, markersize=7, markeredgecolor="white",
+                markeredgewidth=0.6,
+                label=f"{model.upper()}/{key[1]}")
+        ax.fill_between(xs, means - stds, means + stds,
+                        color=color, alpha=0.14)
+        cfg = _PER_MODEL_LABEL.get(key[1],
+                                   {"mod": 0, "dy": 16, "endpoints": True})
+        n = len(xs)
+        for i, (x, ym) in enumerate(zip(xs, means)):
+            if not np.isfinite(ym):
+                continue
+            is_endpoint = cfg["endpoints"] and (i == 0 or i == n - 1)
+            if (i % 2) != cfg["mod"] and not is_endpoint:
+                continue
+            ax.annotate(
+                f"({int(x)}, {ym:.3f})",
+                xy=(x, ym), xytext=(0, cfg["dy"]),
+                textcoords="offset points",
+                ha="center", va="center", fontsize=8, color=color,
+                arrowprops=dict(arrowstyle="-", color=color,
+                                lw=0.4, alpha=0.5, shrinkA=0, shrinkB=2),
+                bbox=dict(boxstyle="round,pad=0.25",
+                          fc="white", ec=color, lw=0.5, alpha=0.92),
+            )
+        drawn_keys.append(key)
+
+    # MLR/exact stays flat by OLS-on-tile invariance — show the same caption
+    # as on the combined plot so the per-model view tells the same story.
+    if model == "mlr" and ("mlr", "exact") in series:
+        lanes = series[("mlr", "exact")]
+        flat = float(np.nanmean(lanes[-1][1]))
+        ax.axhline(flat, color=_COLORS[("mlr", "exact")],
+                   alpha=0.35, linestyle=":")
+        ax.text(
+            0.015, 0.97,
+            f"OLS invariant to uniform duplication  (≈ {flat:.3f})",
+            transform=ax.transAxes, ha="left", va="top", fontsize=8,
+            color=_COLORS[("mlr", "exact")],
+            bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                      ec=_COLORS[("mlr", "exact")], lw=0.5, alpha=0.9),
+        )
+
+    # Skipped markers: small open squares at the top of the plot.
+    if drawn_keys:
+        all_means = np.concatenate([
+            np.array([np.nanmean(t[1]) for t in series[k]])
+            for k in drawn_keys
+        ])
+        y_top = float(np.nanmax(all_means))
+    else:
+        y_top = 1.0
+    for key in relevant:
+        for xk in skips.get(key, []):
+            color = _COLORS.get(key, "gray")
+            ax.plot([xk], [y_top * 1.05 if y_top > 0 else 1.0],
+                    marker="s", mfc="none", mec=color, ms=10,
+                    linestyle="none", zorder=5)
+
+    ax.set_xscale("linear")
+    ax.ticklabel_format(axis="x", useOffset=False, style="plain")
+    ax.set_xlabel("n_ctx (context size per model invocation)")
+    ax.set_ylabel("nRMSE = RMSE / std(y_query)")
+    if drawn_keys:
+        all_means = np.concatenate([
+            np.array([np.nanmean(t[1]) for t in series[k]])
+            for k in drawn_keys
+        ])
+        _apply_ylim_with_floor(ax, all_means)
+    if drawn_keys:
+        ax.legend(loc="center right", frameon=True, framealpha=0.92,
+                  edgecolor="#aaaaaa",
+                  handlelength=3.5, handleheight=1.2,
+                  borderpad=0.7, labelspacing=0.7)
+    _style_axes(ax)
+
+
+# --------------------------------------------------------------------------
 # Single-panel plot (one (model, mode), own y-scale)
 # --------------------------------------------------------------------------
 
@@ -383,6 +494,23 @@ def plot_row_curves(
         )
         fig.tight_layout(rect=(0, 0, 1, 0.94))
         fig.savefig(out_dir / f"row_curve_{model}_{mode}.png")
+        plt.close(fig)
+
+    # 3) per-model: one figure per model with exact+jitter overlaid. Tight
+    # auto-scale on each model's own y-range so the jitter delta is visible
+    # without being squashed by the cross-model range of the combined plot.
+    for model in ("mlr", "tabpfn"):
+        if (model, "exact") not in series and (model, "jitter") not in series:
+            continue
+        fig, ax = plt.subplots(figsize=single_figsize, dpi=dpi)
+        _plot_per_model(ax, model, series, skips)
+        fig.suptitle(
+            f"{dataset}  —  {model.upper()} (exact + jitter)\n"
+            f"(n_ctx = k × n_tr for proportional, k × (N−1) for loo)",
+            fontsize=11, y=0.98,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        fig.savefig(out_dir / f"row_curve_{model}.png")
         plt.close(fig)
 
     return combined_path
