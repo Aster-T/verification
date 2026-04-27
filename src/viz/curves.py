@@ -222,7 +222,11 @@ def _plot_combined(ax, series, skips):
                     marker="s", mfc="none", mec=color, ms=10,
                     linestyle="none", zorder=5)
 
-    ax.set_xscale("log")
+    # Linear axis: n_ctx = k * n_tr (or k * (N-1)) is an arithmetic series
+    # when k_list is, so points sit at equal spacing — no exponential form,
+    # no clustering on the right side of a log axis.
+    ax.set_xscale("linear")
+    ax.ticklabel_format(axis="x", useOffset=False, style="plain")
     ax.set_xlabel("n_ctx (context size per model invocation)")
     ax.set_ylabel("nRMSE = RMSE / std(y_query)")
     if any_drawn:
@@ -303,7 +307,11 @@ def _plot_single(ax, model, mode, series, skips):
                     marker="s", mfc="none", mec=color, ms=10,
                     linestyle="none", zorder=5)
 
-    ax.set_xscale("log")
+    # Linear axis: n_ctx = k * n_tr (or k * (N-1)) is an arithmetic series
+    # when k_list is, so points sit at equal spacing — no exponential form,
+    # no clustering on the right side of a log axis.
+    ax.set_xscale("linear")
+    ax.ticklabel_format(axis="x", useOffset=False, style="plain")
     ax.set_xlabel("n_ctx (context size per model invocation)")
     ax.set_ylabel("nRMSE = RMSE / std(y_query)")
     ax.set_title(f"{model.upper()} / {mode}", fontsize=13, loc="left",

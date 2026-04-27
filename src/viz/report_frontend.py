@@ -115,10 +115,12 @@ FRONTEND_HTML = r"""<!doctype html>
     font-size: 0.78rem; font-weight: 600; margin-left: 0.4rem;
   }
   .compare-grid {
-    display: grid; gap: 0.6rem;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(280px, 1fr);
-    overflow-x: auto;
+    /* Vertical stack so every pinned card stays at the full container width
+       — same readable size as when there's only one. Scroll vertically when
+       multiple cards are pinned. Use the lightbox (click any image) to zoom
+       a single chart for detailed inspection. */
+    display: flex; flex-direction: column;
+    gap: 0.7rem;
   }
   .compare-grid .empty-hint {
     color: var(--fg-muted); font-size: 0.85rem; padding: 0.5rem 0.25rem;
@@ -145,6 +147,50 @@ FRONTEND_HTML = r"""<!doctype html>
   .compare-card img {
     width: 100%; height: auto; border-radius: 0.35rem;
     background: var(--bg-card); display: block;
+    cursor: zoom-in;
+  }
+
+  /* ---------- lightbox (click any image to zoom) ---------- */
+  .image-card img { cursor: zoom-in; }
+  .lightbox-backdrop {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0, 0, 0, 0.92);
+    display: none;
+    padding: 2rem 2.5rem;
+  }
+  .lightbox-backdrop.open {
+    display: flex;
+    justify-content: center; align-items: center;
+  }
+  .lightbox-backdrop img {
+    max-width: 100%; max-height: 100%;
+    object-fit: contain;
+    border-radius: 0.4rem;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    background: #fff;
+  }
+  .lightbox-close {
+    position: absolute; top: 1rem; right: 1.25rem;
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 0.4rem;
+    padding: 0.4rem 0.85rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    user-select: none;
+    font-family: inherit;
+  }
+  .lightbox-close:hover { background: rgba(255, 255, 255, 0.25); }
+  .lightbox-caption {
+    position: absolute; left: 1.25rem; bottom: 1rem;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.85rem;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 0.35rem 0.7rem;
+    border-radius: 0.35rem;
+    max-width: calc(100% - 2.5rem);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
   /* ---------- filters ---------- */
@@ -199,9 +245,14 @@ FRONTEND_HTML = r"""<!doctype html>
 
   /* ---------- gallery ---------- */
   .gallery {
+    /* Two cards per row at the standard viewport. Below ~900px the second
+       column collapses so cards never get unreadable on narrow screens. */
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.85rem; margin-bottom: 2rem;
+  }
+  @media (max-width: 900px) {
+    .gallery { grid-template-columns: 1fr; }
   }
   .image-card {
     background: var(--bg-card); border: 1px solid var(--border);
@@ -254,7 +305,9 @@ FRONTEND_HTML = r"""<!doctype html>
   }
   .macro-cards {
     display: grid; gap: 0.65rem;
-    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    /* auto-fit collapses empty tracks so a single card takes the full row
+       instead of being stuck at one third of the row. */
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   }
   .macro-card {
     background: var(--bg-inset); border: 1px solid var(--border-soft);
@@ -290,7 +343,12 @@ FRONTEND_HTML = r"""<!doctype html>
     padding: 0.22rem 0.45rem;
     border-bottom: 1px solid var(--border-soft);
     font-variant-numeric: tabular-nums;
+    /* Don't break long "mean ± std" cells across two lines; let the row
+       grow horizontally if needed (the card itself sits in an overflow
+       wrapper below). */
+    white-space: nowrap;
   }
+  .macro-card .table-wrap { overflow-x: auto; }
   .macro-card tbody tr:last-child td { border-bottom: none; }
   .macro-card td.label { color: var(--fg-muted); font-variant-numeric: normal; }
   .macro-card.err {
@@ -411,6 +469,12 @@ FRONTEND_HTML = r"""<!doctype html>
   </section>
 
   <section id="gallery" class="gallery"></section>
+
+  <div class="lightbox-backdrop" id="lightbox" aria-hidden="true" role="dialog">
+    <button class="lightbox-close" type="button" id="lightbox-close">Close (Esc)</button>
+    <img alt="">
+    <div class="lightbox-caption" id="lightbox-caption"></div>
+  </div>
 
   <section class="tables-section">
     <h2>Data tables</h2>
@@ -911,10 +975,19 @@ FRONTEND_HTML = r"""<!doctype html>
     host.innerHTML = cards.join("");
   }
 
+  function macroNum(x) {
+    if (x === null || x === undefined || Number.isNaN(x)) return "—";
+    const a = Math.abs(x);
+    // Scientific for very large / very small magnitudes — keeps cells short.
+    if (a !== 0 && (a >= 1e4 || a < 1e-3)) {
+      return x.toExponential(2).replace("e+", "e").replace("e-0", "e-");
+    }
+    return x.toFixed(4);
+  }
   function macroFmt(s) {
     if (!s || s.n === 0) return "—";
-    if (s.n === 1) return s.mean.toFixed(4);
-    return s.mean.toFixed(4) + " ± " + s.std.toFixed(4);
+    if (s.n === 1) return macroNum(s.mean);
+    return macroNum(s.mean) + " ± " + macroNum(s.std);
   }
 
   function macroTableHtml(data, firstColLabel) {
@@ -932,7 +1005,7 @@ FRONTEND_HTML = r"""<!doctype html>
         + keys.map(k => "<td>" + escapeHtml(macroFmt(v[k])) + "</td>").join("")
         + "<td>" + (v.n || 0) + "</td></tr>";
     }).join("");
-    return "<table>" + head + "<tbody>" + rows + "</tbody></table>";
+    return '<div class="table-wrap"><table>' + head + "<tbody>" + rows + "</tbody></table></div>";
   }
 
   function renderMacroCard(pair, overall, perTs) {
@@ -981,7 +1054,8 @@ FRONTEND_HTML = r"""<!doctype html>
         + "<th>n</th></tr></thead>";
       perTsHtml = '<details class="macro-breakdown"><summary>'
         + '按 test_size 展开（' + perTs.length + '）</summary>'
-        + '<table>' + head + '<tbody>' + rows.join("") + '</tbody></table>'
+        + '<div class="table-wrap"><table>' + head + '<tbody>'
+        + rows.join("") + '</tbody></table></div>'
         + '</details>';
     }
 
@@ -996,6 +1070,40 @@ FRONTEND_HTML = r"""<!doctype html>
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
   function escapeAttr(s) { return escapeHtml(s); }
+
+  // ---------- Lightbox: click any chart to zoom; Esc/click outside to close ----------
+  (function setupLightbox() {
+    const lb = document.getElementById("lightbox");
+    if (!lb) return;
+    const lbImg = lb.querySelector("img");
+    const lbCap = document.getElementById("lightbox-caption");
+    function open(src, alt) {
+      lbImg.src = src;
+      lbImg.alt = alt || "";
+      lbCap.textContent = alt || "";
+      lb.classList.add("open");
+      lb.setAttribute("aria-hidden", "false");
+    }
+    function close() {
+      lb.classList.remove("open");
+      lb.setAttribute("aria-hidden", "true");
+      lbImg.removeAttribute("src");
+      lbCap.textContent = "";
+    }
+    document.addEventListener("click", (e) => {
+      const t = e.target;
+      if (t.tagName === "IMG" && t.closest(".image-card, .compare-card")) {
+        open(t.currentSrc || t.src, t.alt);
+      }
+    });
+    lb.addEventListener("click", (e) => {
+      // Click on backdrop or close button closes; click on the image itself stays open.
+      if (e.target === lb || e.target.id === "lightbox-close") close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && lb.classList.contains("open")) close();
+    });
+  })();
 
   // boot
   init();
