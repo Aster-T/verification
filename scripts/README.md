@@ -175,7 +175,7 @@ results/<dataset>/row/
   predictions_<model>_<split>_<mode>_k<k>_s<seed>.csv
 ```
 
-**`metrics.jsonl` 记录 schema(15 字段)**
+**`metrics.jsonl` 记录 schema(17 字段)**
 
 ```json
 {
@@ -189,6 +189,8 @@ results/<dataset>/row/
   "y_query_std": 71.6,  // nrmse 分母
   "nrmse": 0.8172,      // 主指标,跨数据集可比
   "r2": 0.3322, "rmse": 58.5, "mae": 46.2,
+  "mape": 0.124,        // 相对误差 mean(|y_true-y_pred|/|y_true|),仅在 y_true!=0 上聚合;全 0 时为 null
+  "mape_n": 89,         // 实际进入 mape 的样本数(y_true!=0 的行数)
   "fit_sec": 0.001, "predict_sec": 0.0
 }
 ```

@@ -418,7 +418,7 @@ def _aggregate_row_table(jsonl_path: Path) -> str:
     """
     Render a per-(split_mode, model, mode, k) summary table. Columns:
       split, model, mode, k, n_ctx, n_query, n_folds, n_features,
-      nRMSE (mean +- std over seeds), R^2, RMSE, MAE, skipped.
+      nRMSE (mean +- std over seeds), R^2, RMSE, MAE, MAPE, skipped.
     """
     records = read_jsonl(jsonl_path) if jsonl_path.exists() else []
     if not records:
@@ -429,7 +429,8 @@ def _aggregate_row_table(jsonl_path: Path) -> str:
         split = r.get("split_mode", "proportional")
         key = (split, r["model"], r["mode"], r["k"])
         row = by_key.setdefault(key, {
-            "nrmse": [], "r2": [], "rmse": [], "mae": [], "skipped": 0,
+            "nrmse": [], "r2": [], "rmse": [], "mae": [], "mape": [],
+            "skipped": 0,
             "n_ctx": r.get("n_ctx"),
             "n_query": r.get("n_query", r.get("n_te")),
             "n_folds": r.get("n_folds", 1),
@@ -443,6 +444,8 @@ def _aggregate_row_table(jsonl_path: Path) -> str:
             row["r2"].append(r["r2"])  # type: ignore[union-attr]
             row["rmse"].append(r["rmse"])  # type: ignore[union-attr]
             row["mae"].append(r["mae"])  # type: ignore[union-attr]
+            if r.get("mape") is not None:
+                row["mape"].append(r["mape"])  # type: ignore[union-attr]
 
     def fmt(xs: list[float]) -> str:
         if not xs:
@@ -471,12 +474,13 @@ def _aggregate_row_table(jsonl_path: Path) -> str:
             f'<td>{fmt(stats["r2"])}</td>'     # type: ignore[arg-type]
             f'<td>{fmt(stats["rmse"])}</td>'   # type: ignore[arg-type]
             f'<td>{fmt(stats["mae"])}</td>'    # type: ignore[arg-type]
+            f'<td>{fmt(stats["mape"])}</td>'   # type: ignore[arg-type]
             f'<td>{stats["skipped"] or ""}</td></tr>'
         )
     head = (
         "<thead><tr><th>split</th><th>model</th><th>mode</th><th>k</th>"
         "<th>n_ctx</th><th>n_query</th><th>n_folds</th><th>n_features</th>"
-        "<th>nRMSE</th><th>R²</th><th>RMSE</th><th>MAE</th>"
+        "<th>nRMSE</th><th>R²</th><th>RMSE</th><th>MAE</th><th>MAPE</th>"
         "<th>skipped</th></tr></thead>"
     )
     return (

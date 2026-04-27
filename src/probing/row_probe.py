@@ -24,7 +24,12 @@ OUTPUT LAYOUT (for a given dataset, under `row_dir`):
      One record per (model, split_mode, k, mode, seed). Schema:
        dataset, model, split_mode, k, mode, seed,
        n_ctx, n_query, n_folds, n_features, y_query_std,
-       nrmse, r2, rmse, mae, fit_sec, predict_sec
+       nrmse, r2, rmse, mae, mape, mape_n, fit_sec, predict_sec
+     mape  = mean(|y_true - y_pred| / |y_true|), restricted to
+             rows where y_true != 0. null when every y_true is 0.
+     mape_n = number of query rows that contributed to mape (i.e.
+              y_true != 0). For datasets with zero targets (e.g.
+              forest-fires), mape_n < n_query.
      n_ctx / n_query describe a SINGLE model invocation:
        proportional:  n_ctx = k×n_tr,  n_query = n_te,  n_folds = 1
        loo:           n_ctx = k×(N-1), n_query = 1,     n_folds = N
@@ -147,7 +152,12 @@ def duplicate_context(
 
 def _metric_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     """Regression metrics, with nRMSE = RMSE/std(y_true). nrmse is None when
-    std=0; r² is NaN when n<2 or std=0."""
+    std=0; r² is NaN when n<2 or std=0.
+
+    mape = mean(|y_true - y_pred| / |y_true|) over rows where y_true != 0.
+    Rows with y_true == 0 are excluded (their per-point relative error is
+    undefined). mape is None when every y_true is 0; mape_n reports how
+    many rows contributed."""
     y_true = np.asarray(y_true, dtype=np.float64).ravel()
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     mse = float(mean_squared_error(y_true, y_pred))
@@ -155,11 +165,19 @@ def _metric_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     y_std = float(np.std(y_true, ddof=0))
     nrmse: float | None = float(rmse / y_std) if y_std > 0 else None
     r2 = float(r2_score(y_true, y_pred)) if (y_true.size >= 2 and y_std > 0) else float("nan")
+    nz = y_true != 0
+    mape_n = int(nz.sum())
+    mape: float | None = (
+        float(np.mean(np.abs((y_true[nz] - y_pred[nz]) / y_true[nz])))
+        if mape_n > 0 else None
+    )
     return {
         "nrmse": nrmse,
         "r2": r2,
         "rmse": rmse,
         "mae": float(mean_absolute_error(y_true, y_pred)),
+        "mape": mape,
+        "mape_n": mape_n,
         "y_query_std": y_std,
     }
 
@@ -309,6 +327,7 @@ def _run_proportional(
                         "y_query_std": metrics["y_query_std"],
                         "nrmse": metrics["nrmse"], "r2": metrics["r2"],
                         "rmse": metrics["rmse"], "mae": metrics["mae"],
+                        "mape": metrics["mape"], "mape_n": metrics["mape_n"],
                         "fit_sec": float(fit_sec),
                         "predict_sec": float(predict_sec),
                     }
@@ -431,6 +450,7 @@ def _run_loo(
                         "y_query_std": metrics["y_query_std"],
                         "nrmse": metrics["nrmse"], "r2": metrics["r2"],
                         "rmse": metrics["rmse"], "mae": metrics["mae"],
+                        "mape": metrics["mape"], "mape_n": metrics["mape_n"],
                         "fit_sec": float(fit_sec_total),
                         "predict_sec": float(predict_sec_total),
                     }
