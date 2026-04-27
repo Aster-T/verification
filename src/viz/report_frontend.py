@@ -238,6 +238,87 @@ FRONTEND_HTML = r"""<!doctype html>
     border: 1px dashed var(--border); border-radius: 0.6rem;
   }
 
+  /* ---------- macro summary ---------- */
+  .macro-section {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 0.6rem; padding: 0.85rem 1rem; margin-bottom: 1rem;
+    box-shadow: var(--shadow);
+  }
+  .macro-section > .head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.6rem;
+  }
+  .macro-section > .head h2 { font-size: 1rem; margin: 0; color: var(--fg-soft); }
+  .macro-section > .head .hint {
+    color: var(--fg-muted); font-size: 0.82rem;
+  }
+  .macro-cards {
+    display: grid; gap: 0.65rem;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  }
+  .macro-card {
+    background: var(--bg-inset); border: 1px solid var(--border-soft);
+    border-radius: 0.5rem; padding: 0.55rem 0.7rem 0.4rem;
+  }
+  .macro-card .macro-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 0.5rem; margin-bottom: 0.4rem; font-size: 0.88rem;
+    color: var(--fg);
+  }
+  .macro-card .macro-head .ds { font-weight: 600; }
+  .macro-card .macro-head .sig {
+    font-size: 0.78rem; color: var(--fg-muted);
+    background: var(--bg-card); padding: 0.05rem 0.4rem;
+    border-radius: 0.3rem; border: 1px solid var(--border-soft);
+  }
+  .macro-card .macro-head .n {
+    font-size: 0.75rem; color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .macro-card table {
+    width: 100%; border-collapse: collapse; font-size: 0.78rem;
+    background: var(--bg-card); border-radius: 0.35rem; overflow: hidden;
+  }
+  .macro-card thead th {
+    text-align: left; padding: 0.25rem 0.45rem;
+    background: var(--table-head); color: var(--fg-soft);
+    font-weight: 600; font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border);
+  }
+  .macro-card tbody td {
+    padding: 0.22rem 0.45rem;
+    border-bottom: 1px solid var(--border-soft);
+    font-variant-numeric: tabular-nums;
+  }
+  .macro-card tbody tr:last-child td { border-bottom: none; }
+  .macro-card td.label { color: var(--fg-muted); font-variant-numeric: normal; }
+  .macro-card.err {
+    background: var(--warn-soft); border-color: var(--warn-border);
+    color: var(--fg);
+    padding: 0.5rem 0.7rem; font-size: 0.82rem;
+  }
+  .macro-card details.macro-breakdown {
+    margin-top: 0.5rem; padding: 0.35rem 0.5rem 0.4rem;
+    background: var(--bg-card); border: 1px solid var(--border-soft);
+    border-radius: 0.35rem;
+  }
+  .macro-card details.macro-breakdown > summary {
+    cursor: pointer; font-size: 0.78rem; color: var(--fg-soft);
+    user-select: none; list-style: none; font-weight: 500;
+  }
+  .macro-card details.macro-breakdown > summary::before {
+    content: "▸"; display: inline-block; margin-right: 0.35rem;
+    transition: transform 0.15s; color: var(--fg-muted);
+  }
+  .macro-card details.macro-breakdown[open] > summary::before { transform: rotate(90deg); }
+  .macro-card details.macro-breakdown > table { margin-top: 0.35rem; }
+  .macro-card details.macro-breakdown tr.grp td {
+    background: var(--bg-inset); color: var(--fg-soft);
+    font-weight: 600; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 0.2rem 0.45rem;
+  }
+
   /* ---------- tables ---------- */
   .tables-section {
     background: var(--bg-card); border: 1px solid var(--border);
@@ -321,6 +402,14 @@ FRONTEND_HTML = r"""<!doctype html>
     <div class="filter-grid" id="filter-grid"></div>
   </section>
 
+  <section class="macro-section" id="macro-section">
+    <div class="head">
+      <h2>宏指标</h2>
+      <span class="hint">每个 (σ · dataset) 一张卡，按当前筛选下的全部记录聚合。</span>
+    </div>
+    <div class="macro-cards" id="macro-cards"></div>
+  </section>
+
   <section id="gallery" class="gallery"></section>
 
   <section class="tables-section">
@@ -340,6 +429,8 @@ FRONTEND_HTML = r"""<!doctype html>
     manifest: null,
     filters: { sigma: new Set(), test_size: new Set(), dataset: new Set(), chart: new Set() },
     compare: [],   // [{key, src, label}]
+    macroCache: new Map(),  // url → {data, ts}
+    macroToken: 0,          // incremented to invalidate stale fetches
   };
   const FILTERS_KEY = "probing-report-filters-v1";
   const COMPARE_KEY = "probing-report-compare-v1";
@@ -417,6 +508,7 @@ FRONTEND_HTML = r"""<!doctype html>
     renderCompare();
     renderGallery();
     renderTables();
+    renderMacro();
   }
 
   function initFilters() {
@@ -484,6 +576,7 @@ FRONTEND_HTML = r"""<!doctype html>
     updateSummary();
     renderGallery();
     renderTables();
+    renderMacro();
   }
 
   function onFilterAction(e) {
@@ -507,6 +600,7 @@ FRONTEND_HTML = r"""<!doctype html>
     updateSummary();
     renderGallery();
     renderTables();
+    renderMacro();
   }
 
   function updateSummary() {
@@ -732,6 +826,167 @@ FRONTEND_HTML = r"""<!doctype html>
       </tr>`;
     }).join("");
     return `<div class="table-wrap"><table>${headHtml}<tbody>${rows}</tbody></table></div>`;
+  }
+
+  // ---------- Macro summary ----------
+  function computeMacroPairs() {
+    // Returns one entry per (σ, dataset) covered by the current filters.
+    // Each entry also keeps the jsonls bucketed by test_size so the card
+    // can render an overall row plus a per-test_size breakdown without
+    // needing a new endpoint.
+    const f = STATE.filters;
+    const pairs = new Map();
+    for (const t of STATE.manifest.tables) {
+      if (!f.sigma.has(t.sigma)) continue;
+      if (!f.test_size.has(t.test_size)) continue;
+      if (!f.dataset.has(t.dataset)) continue;
+      const key = t.sigma + "|" + t.dataset;
+      let entry = pairs.get(key);
+      if (!entry) {
+        entry = { sigma: t.sigma, dataset: t.dataset,
+                  byTs: new Map(), allJsonls: [] };
+        pairs.set(key, entry);
+      }
+      if (!entry.byTs.has(t.test_size)) entry.byTs.set(t.test_size, []);
+      entry.byTs.get(t.test_size).push(t.jsonl);
+      entry.allJsonls.push(t.jsonl);
+    }
+    return Array.from(pairs.values()).sort((a, b) => {
+      if (a.dataset !== b.dataset) return a.dataset.localeCompare(b.dataset);
+      return a.sigma.localeCompare(b.sigma);
+    });
+  }
+
+  function macroUrl(jsonls) {
+    return "/macro?" + jsonls.slice().sort()
+      .map(j => "jsonl=" + encodeURIComponent(j)).join("&");
+  }
+
+  async function fetchMacro(jsonls) {
+    const url = macroUrl(jsonls);
+    const cached = STATE.macroCache.get(url);
+    if (cached) return cached;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    STATE.macroCache.set(url, data);
+    return data;
+  }
+
+  function tsOrderKey(ts) {
+    if (ts === "loo") return -Infinity;
+    const v = parseFloat(ts);
+    return isFinite(v) ? v : Infinity;
+  }
+
+  async function renderMacro() {
+    const host = document.getElementById("macro-cards");
+    const pairs = computeMacroPairs();
+    if (!pairs.length) {
+      host.innerHTML = '<div class="loading">没有 (σ · dataset) 在当前筛选范围内。</div>';
+      return;
+    }
+    const myToken = ++STATE.macroToken;
+    host.innerHTML = '<div class="loading">computing macro… ('
+      + pairs.length + ' card' + (pairs.length === 1 ? "" : "s") + ')</div>';
+
+    // Fetch overall + per-test_size in parallel; cache hits make this
+    // near-instant after the first render.
+    const cards = await Promise.all(pairs.map(async pair => {
+      try {
+        const tsList = Array.from(pair.byTs.keys())
+          .sort((a, b) => tsOrderKey(a) - tsOrderKey(b));
+        const overallP = fetchMacro(pair.allJsonls);
+        const perTsP = Promise.all(tsList.map(async ts =>
+          ({ ts, data: await fetchMacro(pair.byTs.get(ts)) })));
+        const [overall, perTs] = await Promise.all([overallP, perTsP]);
+        return renderMacroCard(pair, overall, perTs);
+      } catch (e) {
+        return '<div class="macro-card err">'
+          + escapeHtml(pair.dataset) + ' · σ=' + escapeHtml(pair.sigma)
+          + ': ' + escapeHtml(String(e)) + '</div>';
+      }
+    }));
+    if (myToken !== STATE.macroToken) return;
+    host.innerHTML = cards.join("");
+  }
+
+  function macroFmt(s) {
+    if (!s || s.n === 0) return "—";
+    if (s.n === 1) return s.mean.toFixed(4);
+    return s.mean.toFixed(4) + " ± " + s.std.toFixed(4);
+  }
+
+  function macroTableHtml(data, firstColLabel) {
+    const models = Object.keys(data.per_model);
+    if (!models.length) return '<div class="loading">no records</div>';
+    const cols = ["nRMSE", "MAE", "MAPE"];
+    const keys = ["nrmse", "mae", "mape"];
+    if (data.has_tanker) { cols.push("MAPE_tanker"); keys.push("mape_tanker"); }
+    const head = "<thead><tr><th>" + escapeHtml(firstColLabel) + "</th>"
+      + cols.map(c => "<th>" + escapeHtml(c) + "</th>").join("")
+      + "<th>n</th></tr></thead>";
+    const rows = models.map(m => {
+      const v = data.per_model[m];
+      return "<tr><td class='label'>" + escapeHtml(m) + "</td>"
+        + keys.map(k => "<td>" + escapeHtml(macroFmt(v[k])) + "</td>").join("")
+        + "<td>" + (v.n || 0) + "</td></tr>";
+    }).join("");
+    return "<table>" + head + "<tbody>" + rows + "</tbody></table>";
+  }
+
+  function renderMacroCard(pair, overall, perTs) {
+    const skipNote = overall.n_skipped
+      ? ' <span class="n">' + overall.n_skipped + ' skipped</span>' : "";
+    const headHtml = '<div class="macro-head">'
+      + '<span class="ds">' + escapeHtml(pair.dataset) + '</span>'
+      + '<span class="sig">σ=' + escapeHtml(pair.sigma) + '</span>'
+      + '<span class="n">' + overall.n_records + ' rec'
+      + (overall.n_records === 1 ? "" : "s") + skipNote + '</span>'
+      + '</div>';
+
+    const overallHtml = macroTableHtml(overall, "model");
+
+    // Per-test_size breakdown: one big table where each model gets its
+    // own grouped section. Collapsed by default; gives the user the
+    // "ship-all under each test_size" drilldown without extra cards.
+    let perTsHtml = "";
+    if (perTs.length > 1) {
+      const cols = ["nRMSE", "MAE", "MAPE"];
+      const keys = ["nrmse", "mae", "mape"];
+      const showTanker = perTs.some(g => g.data.has_tanker);
+      if (showTanker) { cols.push("MAPE_tanker"); keys.push("mape_tanker"); }
+      const allModels = new Set();
+      for (const g of perTs) Object.keys(g.data.per_model).forEach(m => allModels.add(m));
+      const models = Array.from(allModels).sort();
+      const rows = [];
+      for (const m of models) {
+        rows.push('<tr class="grp"><td colspan="' + (cols.length + 2)
+          + '">' + escapeHtml(m) + '</td></tr>');
+        for (const g of perTs) {
+          const v = g.data.per_model[m];
+          const tsLabel = g.ts === "loo" ? "LOO" : "ts=" + g.ts;
+          if (!v) {
+            rows.push("<tr><td class='label'>" + escapeHtml(tsLabel) + "</td>"
+              + cols.map(() => "<td>—</td>").join("") + "<td>0</td></tr>");
+            continue;
+          }
+          rows.push("<tr><td class='label'>" + escapeHtml(tsLabel) + "</td>"
+            + keys.map(k => "<td>" + escapeHtml(macroFmt(v[k])) + "</td>").join("")
+            + "<td>" + (v.n || 0) + "</td></tr>");
+        }
+      }
+      const head = "<thead><tr><th>test_size</th>"
+        + cols.map(c => "<th>" + escapeHtml(c) + "</th>").join("")
+        + "<th>n</th></tr></thead>";
+      perTsHtml = '<details class="macro-breakdown"><summary>'
+        + '按 test_size 展开（' + perTs.length + '）</summary>'
+        + '<table>' + head + '<tbody>' + rows.join("") + '</tbody></table>'
+        + '</details>';
+    }
+
+    return '<div class="macro-card">'
+      + headHtml + overallHtml + perTsHtml + '</div>';
   }
 
   // ---------- Tiny escape helpers ----------

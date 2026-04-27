@@ -34,7 +34,11 @@ REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 
 from src.viz.report_frontend import FRONTEND_HTML  # noqa: E402
-from src.viz.report_server import aggregate_table, build_manifest  # noqa: E402
+from src.viz.report_server import (  # noqa: E402
+    aggregate_macro,
+    aggregate_table,
+    build_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +91,24 @@ def _make_handler(results_root: Path):
                         self.send_error(404, f"no such jsonl: {rel}")
                         return
                     self._send_json(aggregate_table(target))
+                    return
+                if path == "/macro":
+                    qs = parse_qs(parsed.query)
+                    rels = qs.get("jsonl") or []
+                    if not rels:
+                        self.send_error(400, "missing 'jsonl' param(s)")
+                        return
+                    targets: list[Path] = []
+                    for rel in rels:
+                        t = _safe_under(rel, root_resolved)
+                        if t is None:
+                            self.send_error(400, f"unsafe path: {rel}")
+                            return
+                        # Silently drop missing files — caller can have
+                        # built the request from a slightly stale manifest.
+                        if t.exists():
+                            targets.append(t)
+                    self._send_json(aggregate_macro(targets))
                     return
                 if path.startswith("/results/"):
                     rel = path[len("/results/"):]

@@ -304,3 +304,105 @@ def aggregate_table(jsonl_path: Path) -> dict[str, Any]:
         rows.append(row)
 
     return {"rows": rows, "has_tanker": has_tanker}
+
+
+# --------------------------------------------------------------------------
+# Macro summary (computed on demand for /macro)
+# --------------------------------------------------------------------------
+
+def aggregate_macro(jsonl_paths: list[Path]) -> dict[str, Any]:
+    """Pool every non-skipped record across all `jsonl_paths` into a
+    per-model rollup. Used to answer 'how does the dataset behave overall
+    under the current filter?' — e.g. average MAPE_tanker for ship-all
+    across every (k, mode, seed, test_size) the user is currently looking
+    at.
+
+    Each record in a metrics.jsonl is itself an aggregate over seeds for
+    one (model, k, mode) experiment, so we treat records as the unit of
+    averaging here (no extra weighting).
+
+    Returns:
+      {
+        "n_records":  total non-skipped records considered,
+        "n_skipped":  total skipped records,
+        "per_model":  {"mlr": {n, nrmse, r2, rmse, mae, mape, mape_tanker?}, ...},
+        "has_tanker": bool — true if any record carried mape_tanker,
+      }
+
+    Each metric value is {"mean", "std", "n"}; n may differ from the
+    model's overall n when some records had a null for that metric (e.g.
+    mape is null whenever every y_true == 0 in that experiment).
+    """
+    per_model: dict[str, dict[str, list[float]]] = {}
+    n_records = 0
+    n_skipped = 0
+    has_tanker = False
+    seen_models: set[str] = set()
+
+    for path in jsonl_paths:
+        if not path.exists():
+            continue
+        for r in read_jsonl(path):
+            if r.get("skipped"):
+                n_skipped += 1
+                continue
+            n_records += 1
+            model = str(r.get("model", "?"))
+            seen_models.add(model)
+            bucket = per_model.setdefault(model, {
+                "nrmse": [], "r2": [], "rmse": [], "mae": [],
+                "mape": [], "mape_tanker": [],
+            })
+            if r.get("nrmse") is not None:
+                bucket["nrmse"].append(float(r["nrmse"]))
+            if r.get("r2") is not None and r["r2"] == r["r2"]:  # NaN-safe
+                bucket["r2"].append(float(r["r2"]))
+            if r.get("rmse") is not None:
+                bucket["rmse"].append(float(r["rmse"]))
+            if r.get("mae") is not None:
+                bucket["mae"].append(float(r["mae"]))
+            if r.get("mape") is not None:
+                bucket["mape"].append(float(r["mape"]))
+            if "mape_tanker" in r:
+                has_tanker = True
+                if r.get("mape_tanker") is not None:
+                    bucket["mape_tanker"].append(float(r["mape_tanker"]))
+
+    def _stat(xs: list[float]) -> dict[str, float | int | None]:
+        if not xs:
+            return {"mean": None, "std": None, "n": 0}
+        return {
+            "mean": float(mean(xs)),
+            "std": float(pstdev(xs)) if len(xs) > 1 else 0.0,
+            "n": len(xs),
+        }
+
+    out_per_model: dict[str, dict[str, Any]] = {}
+    for model in sorted(seen_models):
+        b = per_model[model]
+        # m_total = best estimate of how many records contributed to this
+        # model. Different metrics can have different n if some records
+        # had null values (e.g. mape is null when every y_true is zero),
+        # so we report the max — every record contributes to at least one.
+        m_total = max(
+            len(b["nrmse"]), len(b["r2"]), len(b["rmse"]),
+            len(b["mae"]), len(b["mape"]),
+        )
+        entry: dict[str, Any] = {
+            "n": m_total,
+            "nrmse": _stat(b["nrmse"]),
+            "r2": _stat(b["r2"]),
+            "rmse": _stat(b["rmse"]),
+            "mae": _stat(b["mae"]),
+            "mape": _stat(b["mape"]),
+        }
+        if has_tanker:
+            entry["mape_tanker"] = _stat(b["mape_tanker"])
+        out_per_model[model] = entry
+
+    return {
+        "n_records": n_records,
+        "n_skipped": n_skipped,
+        "per_model": out_per_model,
+        "has_tanker": has_tanker,
+    }
