@@ -32,13 +32,31 @@ from src.utils.io import read_jsonl
 # Chart types and their on-disk file names. Order is the display order.
 _CHART_FILES: list[tuple[str, str, str]] = [
     # (id, label, filename)
-    ("row_curve", "Row curve · combined", "row_curve.png"),
-    ("row_curve_mlr", "Row curve · MLR (exact + jitter)", "row_curve_mlr.png"),
-    ("row_curve_tabpfn", "Row curve · TabPFN (exact + jitter)", "row_curve_tabpfn.png"),
-    ("row_curve_mlr_exact", "Row curve · MLR/exact", "row_curve_mlr_exact.png"),
-    ("row_curve_mlr_jitter", "Row curve · MLR/jitter", "row_curve_mlr_jitter.png"),
-    ("row_curve_tabpfn_exact", "Row curve · TabPFN/exact", "row_curve_tabpfn_exact.png"),
-    ("row_curve_tabpfn_jitter", "Row curve · TabPFN/jitter", "row_curve_tabpfn_jitter.png"),
+    # nRMSE bundle (always emitted by plot_row_curves)
+    ("row_curve", "nRMSE · combined", "row_curve.png"),
+    ("row_curve_mlr", "nRMSE · MLR (exact + jitter)", "row_curve_mlr.png"),
+    ("row_curve_tabpfn", "nRMSE · TabPFN (exact + jitter)", "row_curve_tabpfn.png"),
+    ("row_curve_mlr_exact", "nRMSE · MLR/exact", "row_curve_mlr_exact.png"),
+    ("row_curve_mlr_jitter", "nRMSE · MLR/jitter", "row_curve_mlr_jitter.png"),
+    ("row_curve_tabpfn_exact", "nRMSE · TabPFN/exact", "row_curve_tabpfn_exact.png"),
+    ("row_curve_tabpfn_jitter", "nRMSE · TabPFN/jitter", "row_curve_tabpfn_jitter.png"),
+    # MAPE bundle (emitted when records carry mape)
+    ("mape_curve", "MAPE · combined", "mape_curve.png"),
+    ("mape_curve_mlr", "MAPE · MLR (exact + jitter)", "mape_curve_mlr.png"),
+    ("mape_curve_tabpfn", "MAPE · TabPFN (exact + jitter)", "mape_curve_tabpfn.png"),
+    ("mape_curve_mlr_exact", "MAPE · MLR/exact", "mape_curve_mlr_exact.png"),
+    ("mape_curve_mlr_jitter", "MAPE · MLR/jitter", "mape_curve_mlr_jitter.png"),
+    ("mape_curve_tabpfn_exact", "MAPE · TabPFN/exact", "mape_curve_tabpfn_exact.png"),
+    ("mape_curve_tabpfn_jitter", "MAPE · TabPFN/jitter", "mape_curve_tabpfn_jitter.png"),
+    # MAPE on tanker subset (only ship-all / ship-selected get this bundle)
+    ("mape_tanker_curve", "MAPE_tanker · combined", "mape_tanker_curve.png"),
+    ("mape_tanker_curve_mlr", "MAPE_tanker · MLR (exact + jitter)", "mape_tanker_curve_mlr.png"),
+    ("mape_tanker_curve_tabpfn", "MAPE_tanker · TabPFN (exact + jitter)", "mape_tanker_curve_tabpfn.png"),
+    ("mape_tanker_curve_mlr_exact", "MAPE_tanker · MLR/exact", "mape_tanker_curve_mlr_exact.png"),
+    ("mape_tanker_curve_mlr_jitter", "MAPE_tanker · MLR/jitter", "mape_tanker_curve_mlr_jitter.png"),
+    ("mape_tanker_curve_tabpfn_exact", "MAPE_tanker · TabPFN/exact", "mape_tanker_curve_tabpfn_exact.png"),
+    ("mape_tanker_curve_tabpfn_jitter", "MAPE_tanker · TabPFN/jitter", "mape_tanker_curve_tabpfn_jitter.png"),
+    # Column-probe (test_size-independent)
     ("side_by_side", "Column probe · side by side", "side_by_side.png"),
     ("tabpfn_per_layer", "Column probe · TabPFN per-layer", "tabpfn_per_layer.png"),
 ]

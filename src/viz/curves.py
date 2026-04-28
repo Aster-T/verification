@@ -86,6 +86,44 @@ _PER_MODEL_LABEL = {
 }
 
 
+# ----------------------------------------------------------------------
+# Metric configs — drive which jsonl field is plotted, what the y axis /
+# title / file prefix should say. plot_row_curves() emits one full set of
+# 7 PNGs per metric whose data exists in the records (so e.g. MLR-only
+# datasets like forest-fires get just the nrmse set, while ship-all gets
+# nrmse + mape + mape_tanker).
+# ----------------------------------------------------------------------
+class _MetricCfg:
+    __slots__ = ("field", "file_prefix", "ylabel", "title_label")
+
+    def __init__(self, field: str, file_prefix: str,
+                 ylabel: str, title_label: str) -> None:
+        self.field = field
+        self.file_prefix = file_prefix
+        self.ylabel = ylabel
+        self.title_label = title_label
+
+
+_METRIC_NRMSE = _MetricCfg(
+    field="nrmse",
+    file_prefix="row_curve",
+    ylabel="nRMSE = RMSE / std(y_query)",
+    title_label="nRMSE",
+)
+_METRIC_MAPE = _MetricCfg(
+    field="mape",
+    file_prefix="mape_curve",
+    ylabel="MAPE = mean(|y - ŷ| / |y|)  on rows where y ≠ 0",
+    title_label="MAPE",
+)
+_METRIC_MAPE_TANKER = _MetricCfg(
+    field="mape_tanker",
+    file_prefix="mape_tanker_curve",
+    ylabel="MAPE on tanker subset (9 vessels)",
+    title_label="MAPE (tanker)",
+)
+
+
 def _nrmse_series(recs: list[dict]) -> list[float]:
     """Pick nrmse per record (legacy r²-only fallback), rounded to 3
     decimals to match the label display precision. Floating-point noise
@@ -103,13 +141,37 @@ def _nrmse_series(recs: list[dict]) -> list[float]:
     return out
 
 
-def _pivot(by_combo, skipped):
-    """Reshape raw records to per-(model,mode) [(n_ctx, [ys...])]+skip_xs."""
+def _field_series(recs: list[dict], field: str) -> list[float]:
+    """Pick `field` from each record as a float, NaN when missing/null.
+    Same rounding-to-3-decimals as _nrmse_series so the OLS-invariant
+    flat lines render flat after numerical noise."""
+    out: list[float] = []
+    for r in recs:
+        v = r.get(field)
+        if v is None:
+            out.append(float("nan"))
+            continue
+        try:
+            out.append(round(float(v), 3))
+        except (TypeError, ValueError):
+            out.append(float("nan"))
+    return out
+
+
+def _pivot(by_combo, skipped, metric_field: str = "nrmse"):
+    """Reshape raw records to per-(model,mode) [(n_ctx, [ys...])]+skip_xs.
+    `metric_field` selects which jsonl field to plot — 'nrmse' (default)
+    keeps the legacy r²-fallback path; anything else reads the field
+    directly."""
     series: dict[tuple[str, str], list[tuple[int, list[float]]]] = {}
     skips: dict[tuple[str, str], list[int]] = {}
+    series_fn = (
+        _nrmse_series if metric_field == "nrmse"
+        else (lambda recs: _field_series(recs, metric_field))
+    )
     for (model, mode, _k), recs in by_combo.items():
         n_ctx = int(recs[0]["n_ctx"])
-        ys = _nrmse_series(recs)
+        ys = series_fn(recs)
         series.setdefault((model, mode), []).append((n_ctx, ys))
     for (model, mode, _k), recs in skipped.items():
         skips.setdefault((model, mode), []).append(int(recs[0]["n_ctx"]))
@@ -160,7 +222,8 @@ def _set_rc():
 # Combined plot (all 4 lines on one axis)
 # --------------------------------------------------------------------------
 
-def _plot_combined(ax, series, skips):
+def _plot_combined(ax, series, skips, *,
+                   ylabel: str = "nRMSE = RMSE / std(y_query)"):
     """All 4 lines on one axes, shared y-scale. Writes per-point labels
     with zig-zag per-line offsets."""
     any_drawn = False
@@ -238,7 +301,7 @@ def _plot_combined(ax, series, skips):
     ax.set_xscale("linear")
     ax.ticklabel_format(axis="x", useOffset=False, style="plain")
     ax.set_xlabel("n_ctx (context size per model invocation)")
-    ax.set_ylabel("nRMSE = RMSE / std(y_query)")
+    ax.set_ylabel(ylabel)
     if any_drawn:
         all_means = np.concatenate([
             np.array([np.nanmean(t[1]) for t in lanes])
@@ -258,7 +321,8 @@ def _plot_combined(ax, series, skips):
 # Per-model plot (one model, exact + jitter on the same axes)
 # --------------------------------------------------------------------------
 
-def _plot_per_model(ax, model, series, skips):
+def _plot_per_model(ax, model, series, skips, *,
+                    ylabel: str = "nRMSE = RMSE / std(y_query)"):
     """Render exact + jitter for ONE model on shared axes.
 
     Auto-scales tight on this model's data so the exact-vs-jitter delta is
@@ -341,7 +405,7 @@ def _plot_per_model(ax, model, series, skips):
     ax.set_xscale("linear")
     ax.ticklabel_format(axis="x", useOffset=False, style="plain")
     ax.set_xlabel("n_ctx (context size per model invocation)")
-    ax.set_ylabel("nRMSE = RMSE / std(y_query)")
+    ax.set_ylabel(ylabel)
     if drawn_keys:
         all_means = np.concatenate([
             np.array([np.nanmean(t[1]) for t in series[k]])
@@ -360,7 +424,8 @@ def _plot_per_model(ax, model, series, skips):
 # Single-panel plot (one (model, mode), own y-scale)
 # --------------------------------------------------------------------------
 
-def _plot_single(ax, model, mode, series, skips):
+def _plot_single(ax, model, mode, series, skips, *,
+                 ylabel: str = "nRMSE = RMSE / std(y_query)"):
     """Render one (model, mode) on its own axes with auto-scale."""
     color = _COLORS.get((model, mode), "gray")
     lanes = series.get((model, mode), [])
@@ -425,7 +490,7 @@ def _plot_single(ax, model, mode, series, skips):
     ax.set_xscale("linear")
     ax.ticklabel_format(axis="x", useOffset=False, style="plain")
     ax.set_xlabel("n_ctx (context size per model invocation)")
-    ax.set_ylabel("nRMSE = RMSE / std(y_query)")
+    ax.set_ylabel(ylabel)
     ax.set_title(f"{model.upper()} / {mode}", fontsize=13, loc="left",
                  color=color, fontweight="bold")
     _style_axes(ax)
@@ -435,17 +500,88 @@ def _plot_single(ax, model, mode, series, skips):
 # Public entry point
 # --------------------------------------------------------------------------
 
+def _has_metric(records: list[dict], field: str) -> bool:
+    """True iff at least one non-skipped record carries a non-null value
+    for `field`. mape lives on every record we now produce, but old
+    metrics.jsonl files predate it; mape_tanker only exists for ship-all
+    and ship-selected — both must be detected, not assumed."""
+    for r in records:
+        if r.get("skipped"):
+            continue
+        if r.get(field) is not None:
+            return True
+    return False
+
+
+def _plot_one_metric(
+    dataset: str,
+    by_combo: dict,
+    skipped: dict,
+    out_dir: Path,
+    figsize: tuple[float, float],
+    dpi: int,
+    cfg: _MetricCfg,
+) -> Path:
+    """Emit the 7-PNG bundle for ONE metric. Returns the combined path."""
+    series, skips = _pivot(by_combo, skipped, metric_field=cfg.field)
+
+    # 1) combined
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    _plot_combined(ax, series, skips, ylabel=cfg.ylabel)
+    ax.set_title(
+        f"{dataset}: {cfg.title_label} vs context size — all (model, mode) combined\n"
+        f"(mean ± std over seeds;  n_ctx = k × n_tr for proportional, "
+        f"k × (N−1) for loo)",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    combined_path = out_dir / f"{cfg.file_prefix}.png"
+    fig.savefig(combined_path)
+    plt.close(fig)
+
+    # 2) four individual panels
+    single_figsize = (figsize[0] * 0.75, figsize[1] * 0.75)
+    for model, mode in _PANEL_ORDER:
+        fig, ax = plt.subplots(figsize=single_figsize, dpi=dpi)
+        _plot_single(ax, model, mode, series, skips, ylabel=cfg.ylabel)
+        fig.suptitle(
+            f"{dataset}  —  {model.upper()} / {mode}  ·  {cfg.title_label}\n"
+            f"(n_ctx = k × n_tr for proportional, k × (N−1) for loo)",
+            fontsize=11, y=0.98,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        fig.savefig(out_dir / f"{cfg.file_prefix}_{model}_{mode}.png")
+        plt.close(fig)
+
+    # 3) per-model overlay (exact + jitter on tight per-model y-axis)
+    for model in ("mlr", "tabpfn"):
+        if (model, "exact") not in series and (model, "jitter") not in series:
+            continue
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        _plot_per_model(ax, model, series, skips, ylabel=cfg.ylabel)
+        fig.suptitle(
+            f"{dataset}  —  {model.upper()} (exact + jitter)  ·  {cfg.title_label}\n"
+            f"(n_ctx = k × n_tr for proportional, k × (N−1) for loo)",
+            fontsize=11, y=0.98,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        fig.savefig(out_dir / f"{cfg.file_prefix}_{model}.png")
+        plt.close(fig)
+
+    return combined_path
+
+
 def plot_row_curves(
     dataset: str,
     jsonl_path: Path,
     out_dir: Path,
 ) -> Path:
-    """Write 5 PNGs into `out_dir`:
+    """Write the row-probe curve PNGs into `out_dir`. Always emits the
+    nRMSE bundle (7 files, prefix `row_curve`); additionally emits MAPE
+    and MAPE_tanker bundles when the records carry those fields.
 
-      row_curve.png                    all 4 lines combined
-      row_curve_<model>_<mode>.png     4 per-combo plots, each auto-scaled
-
-    Returns the combined plot path.
+    Returns the path to row_curve.png (the nRMSE combined plot) for
+    backward-compatible callers; other bundles are written alongside.
     """
     jsonl_path = Path(jsonl_path)
     out_dir = Path(out_dir)
@@ -464,56 +600,21 @@ def plot_row_curves(
         else:
             by_combo.setdefault(key, []).append(rec)
 
-    series, skips = _pivot(by_combo, skipped)
     _set_rc()
+    figsize = CONFIG["viz"]["figsize_curve"]
     dpi = CONFIG["viz"]["dpi"]
 
-    # 1) combined
-    figsize = CONFIG["viz"]["figsize_curve"]
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    _plot_combined(ax, series, skips)
-    ax.set_title(
-        f"{dataset}: nRMSE vs context size — all (model, mode) combined\n"
-        f"(mean ± std over seeds;  n_ctx = k × n_tr for proportional, "
-        f"k × (N−1) for loo)",
-        fontsize=12,
+    # nRMSE always gets plotted — the legacy r²-fallback in _nrmse_series
+    # means even pre-mape jsonls produce a curve here.
+    combined_path = _plot_one_metric(
+        dataset, by_combo, skipped, out_dir, figsize, dpi, _METRIC_NRMSE,
     )
-    fig.tight_layout()
-    combined_path = out_dir / "row_curve.png"
-    fig.savefig(combined_path)
-    plt.close(fig)
 
-    # 2) four individual panels, each in its own PNG
-    single_figsize = (figsize[0] * 0.75, figsize[1] * 0.75)
-    for model, mode in _PANEL_ORDER:
-        fig, ax = plt.subplots(figsize=single_figsize, dpi=dpi)
-        _plot_single(ax, model, mode, series, skips)
-        fig.suptitle(
-            f"{dataset}  —  {model.upper()} / {mode}\n"
-            f"(n_ctx = k × n_tr for proportional, k × (N−1) for loo)",
-            fontsize=11, y=0.98,
-        )
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
-        fig.savefig(out_dir / f"row_curve_{model}_{mode}.png")
-        plt.close(fig)
-
-    # 3) per-model: one figure per model with exact+jitter overlaid. Tight
-    # auto-scale on each model's own y-range so the jitter delta is visible
-    # without being squashed by the cross-model range of the combined plot.
-    # Uses the full figsize (not the smaller single-panel size) so every
-    # data point's label has room.
-    for model in ("mlr", "tabpfn"):
-        if (model, "exact") not in series and (model, "jitter") not in series:
-            continue
-        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-        _plot_per_model(ax, model, series, skips)
-        fig.suptitle(
-            f"{dataset}  —  {model.upper()} (exact + jitter)\n"
-            f"(n_ctx = k × n_tr for proportional, k × (N−1) for loo)",
-            fontsize=11, y=0.98,
-        )
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
-        fig.savefig(out_dir / f"row_curve_{model}.png")
-        plt.close(fig)
+    # Optional bundles, only when the data is there.
+    for cfg in (_METRIC_MAPE, _METRIC_MAPE_TANKER):
+        if _has_metric(records, cfg.field):
+            _plot_one_metric(
+                dataset, by_combo, skipped, out_dir, figsize, dpi, cfg,
+            )
 
     return combined_path
