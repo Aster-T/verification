@@ -752,6 +752,15 @@ def _run_loo(
             "resume dataset=%s split_mode=loo: %d combos already in %s, will skip them",
             dataset, len(done_keys), jsonl_path.name,
         )
+    # LOO is intentionally serial — folds within a (model, k, mode, seed)
+    # are not parallelized even when parallel_k > 1. Tell the caller
+    # explicitly so a misconfigured CLI doesn't silently look like it's
+    # being honoured.
+    if parallel_k and parallel_k > 1:
+        logger.info(
+            "split_mode=loo: parallel_k=%d ignored (LOO folds always run serially)",
+            parallel_k,
+        )
 
     for seed in seeds:
         set_seed(seed)
@@ -843,41 +852,18 @@ def _run_loo(
                         predict_sec_total += ps
                         return True
 
-                    # MLR is CPU-only; threading just adds GIL contention
-                    # over BLAS calls. Only parallelize TabPFN.
-                    use_parallel = parallel_k > 1 and model == "tabpfn"
-                    if not use_parallel:
-                        for i in range(n):
-                            try:
-                                y_pred, fs, ps = _fold(i)
-                            except Exception as e:  # noqa: BLE001
-                                failed = e
-                                break
-                            if not _consume(i, y_pred, fs, ps):
-                                break
-                    else:
-                        # _blas_budget_ctx prevents BLAS oversubscription when
-                        # K folds run TabPFN preprocessing concurrently — see
-                        # _blas_budget_ctx docstring for the math.
-                        with _blas_budget_ctx(parallel_k), ThreadPoolExecutor(max_workers=parallel_k) as pool:
-                            futs = {pool.submit(_fold, i): i for i in range(n)}
-                            try:
-                                for fut in as_completed(futs):
-                                    i = futs[fut]
-                                    try:
-                                        y_pred, fs, ps = fut.result()
-                                    except Exception as e:  # noqa: BLE001
-                                        failed = e
-                                        break
-                                    if not _consume(i, y_pred, fs, ps):
-                                        break
-                            finally:
-                                # Cancel pending tasks on early exit so the
-                                # pool tears down quickly; running futures
-                                # finish naturally (cancel is a no-op on
-                                # already-started work).
-                                for f in futs:
-                                    f.cancel()
+                    # LOO always runs folds serially. The user opted out of
+                    # fold-level concurrency here even for TabPFN — proportional
+                    # mode keeps its (k, mode, model) parallelism, this branch
+                    # does not. parallel_k is therefore ignored in LOO.
+                    for i in range(n):
+                        try:
+                            y_pred, fs, ps = _fold(i)
+                        except Exception as e:  # noqa: BLE001
+                            failed = e
+                            break
+                        if not _consume(i, y_pred, fs, ps):
+                            break
 
                     if failed is not None:
                         write_jsonl(jsonl_path, [{
