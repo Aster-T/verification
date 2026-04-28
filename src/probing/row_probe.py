@@ -183,9 +183,10 @@ def duplicate_context(
     rng: np.random.Generator,
     jitter_sigma: float | None = None,
     is_nominal: list[bool] | None = None,
+    jitter_scale: str = "absolute",
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Tile (X, y) k-fold. In "jitter" mode, add N(0, sigma) noise to the
+    Tile (X, y) k-fold. In "jitter" mode, add gaussian noise to the
     duplicated X cells — **except**:
       - the first tile (rows 0..n-1) is preserved as the original anchor and
         receives no noise; only tiles 1..k-1 are perturbed.
@@ -202,11 +203,26 @@ def duplicate_context(
       is_nominal: optional list[bool] of length X.shape[1]. When provided,
         noise is zeroed on columns where is_nominal[j] is True. When None,
         all columns receive noise (legacy behaviour).
+      jitter_scale: how σ relates to per-column scale.
+        "absolute"    -> noise[j] ~ N(0, σ²) for every numeric column j
+                         (legacy behavior; the same σ regardless of how big
+                         the column's values are).
+        "per_col_std" -> noise[j] ~ N(0, (σ · std_j)²) where std_j is the
+                         std of column j on the **untiled** X. Makes σ a
+                         dimensionless relative perturbation strength so
+                         the same σ behaves comparably across columns and
+                         datasets of vastly different magnitudes. Constant
+                         columns (std_j == 0) still receive zero noise.
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
     if mode not in ("exact", "jitter"):
         raise ValueError(f"mode must be 'exact' or 'jitter', got {mode!r}")
+    if jitter_scale not in ("absolute", "per_col_std"):
+        raise ValueError(
+            f"jitter_scale must be 'absolute' or 'per_col_std', "
+            f"got {jitter_scale!r}"
+        )
     n = X.shape[0]
     X_rep = np.tile(X, (k, 1))
     y_rep = np.tile(y, k)
@@ -228,7 +244,7 @@ def duplicate_context(
         if sigma > 0 and k >= 2:
             if X_rep.dtype == object:
                 # Per-column path: leave nominal/text columns exactly as-is,
-                # add N(0, sigma) noise to numeric columns only.
+                # add gaussian noise to numeric columns only.
                 for j in range(X_rep.shape[1]):
                     if nominal_mask is not None and nominal_mask[j]:
                         continue
@@ -238,20 +254,35 @@ def duplicate_context(
                     if any(isinstance(v, str) for v in col):
                         continue
                     float_col = np.array(col, dtype=np.float64)
-                    noise_col = rng.standard_normal(float_col.shape[0]) * sigma
+                    if jitter_scale == "per_col_std":
+                        # std on the original (untiled) rows, not X_rep.
+                        col_std = float(np.std(float_col[:n], ddof=0))
+                        eff_sigma = sigma * col_std  # 0 -> column stays put
+                    else:
+                        eff_sigma = sigma
+                    noise_col = (
+                        rng.standard_normal(float_col.shape[0]) * eff_sigma
+                    )
                     # Anchor: rows 0..n-1 are tile 0 — keep pristine.
                     noise_col[:n] = 0.0
                     float_col += noise_col
                     X_rep[:, j] = float_col
             else:
-                noise = rng.standard_normal(X_rep.shape) * sigma
+                X_rep_f = X_rep.astype(np.float64, copy=False)
+                noise = rng.standard_normal(X_rep_f.shape) * sigma
+                if jitter_scale == "per_col_std":
+                    # std per column on the original (untiled) rows, not the
+                    # k-fold tile (the tile has the same std as X anyway,
+                    # but anchoring on X is unambiguous).
+                    col_std = np.std(X_rep_f[:n], axis=0, ddof=0)
+                    noise = noise * col_std[np.newaxis, :]
                 # Anchor: rows 0..n-1 are tile 0 — keep pristine.
                 noise[:n, :] = 0.0
                 if nominal_mask is not None:
                     # Suppress noise on nominal columns so integer codes stay
                     # integer-valued (preserves the category semantics).
                     noise[:, nominal_mask] = 0.0
-                X_rep = X_rep + noise
+                X_rep = X_rep_f + noise
     y_out = y_rep.astype(np.float64, copy=False)
     # Keep object dtype when present (caller decides how to use it); cast
     # numeric case to float64 for downstream math.
@@ -439,6 +470,7 @@ def _run_proportional(
     models: list[str],
     test_size: float | None = None,
     jitter_sigma: float | None = None,
+    jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
 ) -> None:
     effective_test_size = (
@@ -502,6 +534,7 @@ def _run_proportional(
                     X_tr, y_tr, k, mode, rng,
                     jitter_sigma=jitter_sigma,
                     is_nominal=is_nominal,
+                    jitter_scale=jitter_scale,
                 )
 
                 for model in todo_models:
@@ -516,6 +549,7 @@ def _run_proportional(
                         "n_query": int(n_query),
                         "n_folds": 1,
                         "n_features": int(n_features),
+                        "jitter_scale": jitter_scale,
                     }
 
                     try:
@@ -595,6 +629,7 @@ def _run_loo(
     seeds: list[int],
     models: list[str],
     jitter_sigma: float | None = None,
+    jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
 ) -> None:
     # Schema-aware resume — see _run_proportional for the rationale.
@@ -643,6 +678,7 @@ def _run_loo(
                         "n_ctx": int(n_ctx),
                         "n_query": 1, "n_folds": int(n),
                         "n_features": int(n_features),
+                        "jitter_scale": jitter_scale,
                     }
 
                     y_true_all = np.empty(n, dtype=np.float64)
@@ -660,6 +696,7 @@ def _run_loo(
                             X[mask], y[mask], k, mode, rng,
                             jitter_sigma=jitter_sigma,
                             is_nominal=is_nominal,
+                            jitter_scale=jitter_scale,
                         )
                         try:
                             if model == "mlr":
@@ -750,6 +787,7 @@ def run_row_probe(
     split_mode: str = "proportional",
     test_size: float | None = None,
     jitter_sigma: float | None = None,
+    jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
 ) -> None:
     """
@@ -763,6 +801,11 @@ def run_row_probe(
       jitter_sigma: Gaussian std used by `mode="jitter"`. None → use
         CONFIG["row_probe"]["jitter_sigma"] (usually 1e-6). 0 makes jitter
         numerically identical to exact.
+      jitter_scale: "absolute" (default, legacy) or "per_col_std". Controls
+        whether σ is the noise std directly or a multiplier on each column's
+        std. The two are intended as ablation siblings — caller is expected
+        to partition the output path on this value (see scripts/run_row_probe
+        .py) so records from the two variants don't collide.
 
     RESUME / FRESH semantics:
       The runners skip any (model, k, mode, seed) combo whose record already
@@ -784,6 +827,11 @@ def run_row_probe(
         raise ValueError(
             f"jitter_sigma must be >= 0, got {jitter_sigma!r}"
         )
+    if jitter_scale not in ("absolute", "per_col_std"):
+        raise ValueError(
+            f"jitter_scale must be 'absolute' or 'per_col_std', "
+            f"got {jitter_scale!r}"
+        )
     row_dir = ensure_dir(row_dir)
     jsonl_path = row_dir / "metrics.jsonl"
 
@@ -794,6 +842,7 @@ def run_row_probe(
         else float(CONFIG["row_probe"]["jitter_sigma"])
     )
     sigma_str = f"{effective_sigma:g}" if "jitter" in modes else "n/a"
+    scale_str = jitter_scale if "jitter" in modes else "n/a"
     test_size_str: str
     if split_mode == "proportional":
         if test_size is not None:
@@ -808,15 +857,16 @@ def run_row_probe(
     logger.info(
         "row_probe start dataset=%s split_mode=%s models=%s "
         "k_list=%s modes=%s seeds=%s test_size=%s jitter_sigma=%s "
-        "tabpfn_numeric=%s out=%s",
+        "jitter_scale=%s tabpfn_numeric=%s out=%s",
         dataset, split_mode, models, k_list, modes, seeds,
-        test_size_str, sigma_str, tabpfn_numeric, row_dir,
+        test_size_str, sigma_str, scale_str, tabpfn_numeric, row_dir,
     )
 
     if split_mode == "proportional":
         _run_proportional(
             dataset, row_dir, jsonl_path, k_list, modes, seeds, models,
             test_size=test_size, jitter_sigma=jitter_sigma,
+            jitter_scale=jitter_scale,
             tabpfn_numeric=tabpfn_numeric,
         )
     else:
@@ -827,5 +877,6 @@ def run_row_probe(
         _run_loo(
             dataset, row_dir, jsonl_path, k_list, modes, seeds, models,
             jitter_sigma=jitter_sigma,
+            jitter_scale=jitter_scale,
             tabpfn_numeric=tabpfn_numeric,
         )

@@ -26,6 +26,7 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
+from src.configs import CONFIG
 from src.utils.io import read_jsonl
 
 
@@ -72,6 +73,13 @@ def _parse_ts_dir(name: str) -> str | None:
     return name[len("test_size_"):] if name.startswith("test_size_") else None
 
 
+def _parse_jitter_scale_dir(name: str) -> str | None:
+    """`jitter_per_col_std/` -> 'per_col_std'; anything else -> None.
+    The 'absolute' scale has no on-disk subdirectory by design (legacy
+    layout); callers tag its entries with 'absolute' implicitly."""
+    return name[len("jitter_"):] if name.startswith("jitter_") else None
+
+
 def _scan_viz(viz_dir: Path) -> list[str]:
     """Return chart-type ids (`_CHART_FILES` keys) whose PNG exists in
     `viz_dir`."""
@@ -84,21 +92,30 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
     """Walk `results_root` and emit the JSON-shaped manifest the
     frontend consumes.
 
+    Path layouts handled (any combination present is fine):
+      <results>/sigma_<σ>/<ds>/...                                 LOO,  scale=absolute
+      <results>/sigma_<σ>/test_size_<ts>/<ds>/...                  PROP, scale=absolute
+      <results>/sigma_<σ>/jitter_<scale>/<ds>/...                  LOO,  scale=<scale>
+      <results>/sigma_<σ>/jitter_<scale>/test_size_<ts>/<ds>/...   PROP, scale=<scale>
+
     The returned dict has these keys:
-      sigmas:      sorted list of σ tags (e.g. ["1e-2", "1e-3", ...]).
-      test_sizes:  sorted list of test_size labels with "loo" first if
-                   present, then "0.1", "0.2", ... in numeric order.
-      datasets:    sorted list of dataset names that appear anywhere.
-      chart_types: list of {id, label} for charts present in any item.
-      images:      list of {sigma, test_size, dataset, chart, label, url}.
-      tables:      list of {sigma, test_size, dataset, label, jsonl}.
-                   `jsonl` is a relative-to-results_root path the server
-                   passes to `aggregate_table` on demand.
+      sigmas:        sorted list of σ tags (e.g. ["1e-2", "1e-3", ...]).
+      test_sizes:    sorted list of test_size labels with "loo" first if
+                     present, then "0.1", "0.2", ... in numeric order.
+      datasets:      sorted list of dataset names that appear anywhere.
+      jitter_scales: sorted list of jitter-scale tags ("absolute",
+                     "per_col_std", ...).
+      chart_types:   list of {id, label} for charts present in any item.
+      images:        list of {sigma, jitter_scale, test_size, dataset,
+                     chart, label, url}.
+      tables:        list of {sigma, jitter_scale, test_size, dataset,
+                     label, jsonl}.
     """
     results_root = Path(results_root)
     sigmas: set[str] = set()
     test_sizes: set[str] = set()
     datasets: set[str] = set()
+    jitter_scales: set[str] = set()
     chart_ids: set[str] = set()
     images: list[dict[str, str]] = []
     tables: list[dict[str, str]] = []
@@ -106,109 +123,166 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
     if not results_root.exists():
         return _empty_manifest()
 
-    for sigma_dir in sorted(results_root.iterdir()):
-        sigma = _parse_sigma_dir(sigma_dir.name) if sigma_dir.is_dir() else None
-        if sigma is None:
-            continue
-        sigmas.add(sigma)
+    def emit_loo(ds_dir: Path, sigma: str, scale: str) -> None:
+        """Emit manifest entries for a candidate LOO dataset directory."""
+        ds = ds_dir.name
+        viz_dir = ds_dir / "viz"
+        row_jsonl = ds_dir / "row" / "metrics.jsonl"
+        charts_here = _scan_viz(viz_dir)
+        if not (charts_here or row_jsonl.exists()):
+            return
+        datasets.add(ds)
+        test_sizes.add("loo")
+        jitter_scales.add(scale)
+        for cid in charts_here:
+            rel = (viz_dir / _CHART_FILENAMES[cid]).relative_to(results_root)
+            images.append({
+                "sigma": sigma,
+                "jitter_scale": scale,
+                "test_size": "loo",
+                "dataset": ds,
+                "chart": cid,
+                "label": _CHART_LABELS[cid],
+                "url": f"/results/{rel.as_posix()}",
+            })
+            chart_ids.add(cid)
+        if row_jsonl.exists():
+            rel = row_jsonl.relative_to(results_root)
+            scale_suffix = "" if scale == "absolute" else f" · scale={scale}"
+            tables.append({
+                "sigma": sigma,
+                "jitter_scale": scale,
+                "test_size": "loo",
+                "dataset": ds,
+                "label": f"{ds} · σ={sigma} · LOO{scale_suffix}",
+                "jsonl": rel.as_posix(),
+            })
 
-        # 1) sigma-level (LOO + column probe). Each direct subdir that
-        #    isn't `test_size_*` is a dataset directory.
-        for ds_dir in sorted(sigma_dir.iterdir()):
-            if not ds_dir.is_dir() or ds_dir.name.startswith("test_size_"):
+    def emit_prop(ds_dir: Path, sigma: str, ts: str, scale: str) -> None:
+        """Emit manifest entries for a candidate proportional dataset
+        directory (under test_size_<ts>/)."""
+        ds = ds_dir.name
+        viz_dir = ds_dir / "viz"
+        row_jsonl = ds_dir / "row" / "metrics.jsonl"
+        charts_here = _scan_viz(viz_dir)
+        if not (charts_here or row_jsonl.exists()):
+            return
+        datasets.add(ds)
+        test_sizes.add(ts)
+        jitter_scales.add(scale)
+        for cid in charts_here:
+            # Column-probe charts only live at the sigma level
+            # (test_size-independent), so silently ignore stale copies
+            # under test_size_*/.
+            if cid in ("side_by_side", "tabpfn_per_layer"):
                 continue
-            ds = ds_dir.name
-            viz_dir = ds_dir / "viz"
-            row_jsonl = ds_dir / "row" / "metrics.jsonl"
+            rel = (viz_dir / _CHART_FILENAMES[cid]).relative_to(results_root)
+            images.append({
+                "sigma": sigma,
+                "jitter_scale": scale,
+                "test_size": ts,
+                "dataset": ds,
+                "chart": cid,
+                "label": _CHART_LABELS[cid],
+                "url": f"/results/{rel.as_posix()}",
+            })
+            chart_ids.add(cid)
+        if row_jsonl.exists():
+            rel = row_jsonl.relative_to(results_root)
+            scale_suffix = "" if scale == "absolute" else f" · scale={scale}"
+            tables.append({
+                "sigma": sigma,
+                "jitter_scale": scale,
+                "test_size": ts,
+                "dataset": ds,
+                "label": f"{ds} · σ={sigma} · test_size={ts}{scale_suffix}",
+                "jsonl": rel.as_posix(),
+            })
 
-            charts_here = _scan_viz(viz_dir)
-            if charts_here or row_jsonl.exists():
-                datasets.add(ds)
-                test_sizes.add("loo")
-
-            for cid in charts_here:
-                rel = (viz_dir / _CHART_FILENAMES[cid]).relative_to(results_root)
-                images.append({
-                    "sigma": sigma,
-                    "test_size": "loo",
-                    "dataset": ds,
-                    "chart": cid,
-                    "label": _CHART_LABELS[cid],
-                    "url": f"/results/{rel.as_posix()}",
-                })
-                chart_ids.add(cid)
-
-            if row_jsonl.exists():
-                rel = row_jsonl.relative_to(results_root)
-                tables.append({
-                    "sigma": sigma,
-                    "test_size": "loo",
-                    "dataset": ds,
-                    "label": f"{ds} · σ={sigma} · LOO",
-                    "jsonl": rel.as_posix(),
-                })
-
-        # 2) proportional: test_size_<ts>/<ds>/...
-        for ts_dir in sorted(sigma_dir.iterdir()):
+    def scan_base(base_dir: Path, sigma: str, scale: str) -> None:
+        """Scan one (sigma, scale) base directory for both LOO and PROP
+        dataset entries."""
+        # LOO datasets: any direct child that isn't a test_size_*/ or
+        # a jitter_*/ subdir is a dataset name.
+        for child in sorted(base_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            if child.name.startswith("test_size_"):
+                continue
+            if child.name.startswith("jitter_"):
+                continue
+            emit_loo(child, sigma, scale)
+        # PROP datasets: under each test_size_<ts>/<ds>/.
+        for ts_dir in sorted(base_dir.iterdir()):
             ts = _parse_ts_dir(ts_dir.name) if ts_dir.is_dir() else None
             if ts is None:
                 continue
             for ds_dir in sorted(ts_dir.iterdir()):
                 if not ds_dir.is_dir():
                     continue
-                ds = ds_dir.name
-                viz_dir = ds_dir / "viz"
-                row_jsonl = ds_dir / "row" / "metrics.jsonl"
+                emit_prop(ds_dir, sigma, ts, scale)
 
-                charts_here = _scan_viz(viz_dir)
-                if charts_here or row_jsonl.exists():
-                    datasets.add(ds)
-                    test_sizes.add(ts)
+    for sigma_dir in sorted(results_root.iterdir()):
+        sigma = _parse_sigma_dir(sigma_dir.name) if sigma_dir.is_dir() else None
+        if sigma is None:
+            continue
+        sigmas.add(sigma)
 
-                for cid in charts_here:
-                    # Column-probe charts only live at the sigma level
-                    # (test_size-independent), so silently ignore stale
-                    # copies under test_size_*/.
-                    if cid in ("side_by_side", "tabpfn_per_layer"):
-                        continue
-                    rel = (viz_dir / _CHART_FILENAMES[cid]).relative_to(results_root)
-                    images.append({
-                        "sigma": sigma,
-                        "test_size": ts,
-                        "dataset": ds,
-                        "chart": cid,
-                        "label": _CHART_LABELS[cid],
-                        "url": f"/results/{rel.as_posix()}",
-                    })
-                    chart_ids.add(cid)
+        # Default scale ("absolute") sits directly under sigma_<σ>/ — that's
+        # the legacy layout. Pre-existing trees are read transparently.
+        scan_base(sigma_dir, sigma, "absolute")
 
-                if row_jsonl.exists():
-                    rel = row_jsonl.relative_to(results_root)
-                    tables.append({
-                        "sigma": sigma,
-                        "test_size": ts,
-                        "dataset": ds,
-                        "label": f"{ds} · σ={sigma} · test_size={ts}",
-                        "jsonl": rel.as_posix(),
-                    })
+        # Non-default scales sit under jitter_<scale>/ (sibling of the
+        # legacy LOO/test_size dirs).
+        for scale_dir in sorted(sigma_dir.iterdir()):
+            scale = (
+                _parse_jitter_scale_dir(scale_dir.name)
+                if scale_dir.is_dir()
+                else None
+            )
+            if scale is None:
+                continue
+            scan_base(scale_dir, sigma, scale)
 
     return {
         "sigmas": sorted(sigmas, key=_sigma_sort_key),
         "test_sizes": _order_test_sizes(test_sizes),
         "datasets": sorted(datasets),
+        "jitter_scales": _order_jitter_scales(jitter_scales),
         "chart_types": [
             {"id": cid, "label": _CHART_LABELS[cid]}
             for cid, _, _ in _CHART_FILES if cid in chart_ids
         ],
         "images": images,
         "tables": tables,
+        "decimal_places": _decimal_places(),
     }
+
+
+def _order_jitter_scales(scales: set[str]) -> list[str]:
+    """'absolute' first (legacy/default), then the rest alphabetically.
+    Stable order keeps the frontend filter UI predictable."""
+    rest = sorted(s for s in scales if s != "absolute")
+    return (["absolute"] if "absolute" in scales else []) + rest
+
+
+def _decimal_places() -> int:
+    """Frontend display precision (used for both .toFixed and .toExponential
+    in JS). Sourced from CONFIG['viz']['decimal_places']; falls back to 4
+    when missing or invalid so a stale config never breaks the page."""
+    try:
+        v = int(CONFIG["viz"].get("decimal_places", 4))
+        return v if v >= 0 else 4
+    except (TypeError, ValueError):
+        return 4
 
 
 def _empty_manifest() -> dict[str, Any]:
     return {
         "sigmas": [], "test_sizes": [], "datasets": [],
+        "jitter_scales": [],
         "chart_types": [], "images": [], "tables": [],
+        "decimal_places": _decimal_places(),
     }
 
 

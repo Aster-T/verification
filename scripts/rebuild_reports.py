@@ -37,15 +37,30 @@ def discover_sigmas(results_root: Path) -> list[Path]:
     )
 
 
-def regen_one_sigma(sigma_root: Path) -> tuple[int, int, int]:
-    """Regenerate every viz dir under sigma_root that has artefacts.
-    Returns (row_curves_done, heatmaps_done, errors)."""
-    rc, hm, err = 0, 0, 0
-    sigma = sigma_root.name[len("sigma_"):]
+def _regen_under(
+    base_dir: Path, sigma: str, scale: str,
+) -> tuple[int, int, int]:
+    """Walk one (sigma, scale) base directory and rebuild every viz/ that
+    has either row metrics or a column-probe MLR npz alongside. The base
+    is either `sigma_<σ>/` (legacy "absolute" layout) or
+    `sigma_<σ>/jitter_<scale>/` (the new ablation siblings).
 
-    # 1) sigma-level: LOO row probe + column probe
-    for child in sorted(sigma_root.iterdir()):
-        if not child.is_dir() or child.name.startswith("test_size_"):
+    Returns (row_curves_done, heatmaps_done, errors). Logs include both
+    sigma and scale so multi-scale runs are traceable.
+    """
+    rc, hm, err = 0, 0, 0
+    tag = f"{sigma} · {scale}"
+
+    # 1) base-level: LOO row probe + column probe (column probe lives on
+    #    the legacy "absolute" path only; per_col_std subtree won't have
+    #    a column/ dir, but we still try and silently move on if missing).
+    for child in sorted(base_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        # Skip the layered subdirs we recurse into separately.
+        if child.name.startswith("test_size_"):
+            continue
+        if child.name.startswith("jitter_"):
             continue
         ds = child.name
         viz_dir = child / "viz"
@@ -56,24 +71,25 @@ def regen_one_sigma(sigma_root: Path) -> tuple[int, int, int]:
             try:
                 viz_dir.mkdir(parents=True, exist_ok=True)
                 plot_row_curves(ds, loo_jsonl, viz_dir)
-                logger.info("[%s] %s LOO curves rebuilt", sigma, ds)
+                logger.info("[%s] %s LOO curves rebuilt", tag, ds)
                 rc += 1
             except Exception as e:  # noqa: BLE001
-                logger.warning("[%s] %s LOO curves failed: %s", sigma, ds, e)
+                logger.warning("[%s] %s LOO curves failed: %s", tag, ds, e)
                 err += 1
 
         if (column_dir / "mlr.npz").exists():
             try:
                 viz_dir.mkdir(parents=True, exist_ok=True)
                 plot_column_heatmaps(ds, column_dir, viz_dir)
-                logger.info("[%s] %s column heatmaps rebuilt", sigma, ds)
+                logger.info("[%s] %s column heatmaps rebuilt", tag, ds)
                 hm += 1
             except Exception as e:  # noqa: BLE001
-                logger.warning("[%s] %s column heatmaps failed: %s", sigma, ds, e)
+                logger.warning("[%s] %s column heatmaps failed: %s",
+                               tag, ds, e)
                 err += 1
 
     # 2) per-test_size: proportional row probe
-    for ts_child in sorted(sigma_root.iterdir()):
+    for ts_child in sorted(base_dir.iterdir()):
         if not ts_child.is_dir() or not ts_child.name.startswith("test_size_"):
             continue
         ts = ts_child.name[len("test_size_"):]
@@ -89,13 +105,30 @@ def regen_one_sigma(sigma_root: Path) -> tuple[int, int, int]:
                 viz_dir.mkdir(parents=True, exist_ok=True)
                 plot_row_curves(ds, prop_jsonl, viz_dir)
                 logger.info("[%s ts=%s] %s PROP curves rebuilt",
-                            sigma, ts, ds)
+                            tag, ts, ds)
                 rc += 1
             except Exception as e:  # noqa: BLE001
                 logger.warning("[%s ts=%s] %s PROP curves failed: %s",
-                               sigma, ts, ds, e)
+                               tag, ts, ds, e)
                 err += 1
 
+    return rc, hm, err
+
+
+def regen_one_sigma(sigma_root: Path) -> tuple[int, int, int]:
+    """Regenerate every viz dir under sigma_root that has artefacts. Walks
+    both the legacy "absolute" layout (sigma_<σ>/<ds>/...) and the new
+    jitter-scale ablation subtrees (sigma_<σ>/jitter_<scale>/<ds>/...)."""
+    sigma = sigma_root.name[len("sigma_"):]
+    rc, hm, err = _regen_under(sigma_root, sigma, "absolute")
+    for child in sorted(sigma_root.iterdir()):
+        if not child.is_dir() or not child.name.startswith("jitter_"):
+            continue
+        scale = child.name[len("jitter_"):]
+        s_rc, s_hm, s_err = _regen_under(child, sigma, scale)
+        rc += s_rc
+        hm += s_hm
+        err += s_err
     return rc, hm, err
 
 

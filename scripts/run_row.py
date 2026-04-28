@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-"""Orchestrate the row-probe sweep across (sigma × test_size).
+"""Orchestrate the row-probe sweep across (jitter_scale × sigma × test_size).
 
-For each sigma in JITTER_SIGMAS:
-  1. LOO once on the local datasets.
-  2. For each test_size in TEST_SIZES, proportional split on the OpenML datasets.
-  3. Build the per-sigma report.
+For each jitter_scale in JITTER_SCALES:
+  For each sigma in JITTER_SIGMAS:
+    1. LOO once on the local datasets.
+    2. For each test_size in TEST_SIZES, proportional split on the OpenML datasets.
+At the end, regenerate every PNG and print where to find the live report.
 
 Edit the constants at the top of the file. Errors from any subprocess
 abort the whole run (subprocess.run(..., check=True)).
@@ -28,6 +29,13 @@ OPENML_DATASETS = [
     "forest-fires",
 ]
 
+# Two jitter-scale ablations (see src/probing/row_probe.py::duplicate_context):
+#   "absolute"    -> noise = N(0, σ²) for every numeric cell (legacy).
+#   "per_col_std" -> noise per column scaled by that column's std on the
+#                    untiled X — σ becomes a relative perturbation strength.
+# Each scale lands in a disjoint subtree (jitter_<scale>/ for non-default),
+# so the two coexist as independent ablation runs.
+JITTER_SCALES = ["absolute", "per_col_std"]
 JITTER_SIGMAS = ["1e-2", "1e-3", "1e-4", "1e-5", "1e-6"]
 TEST_SIZES = ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9"]
 SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
@@ -61,72 +69,84 @@ def main() -> int:
     local_args = [a for d in LOCAL_DATASETS for a in ("--dataset", d)]
     openml_args = [a for d in OPENML_DATASETS for a in ("--openml-preset", d)]
 
-    total = len(JITTER_SIGMAS) * len(TEST_SIZES)
+    total = len(JITTER_SCALES) * len(JITTER_SIGMAS) * len(TEST_SIZES)
     combo = 0
 
-    for sigma in JITTER_SIGMAS:
-        banner(f"SIGMA = {sigma}")
+    for scale in JITTER_SCALES:
+        banner(f"JITTER_SCALE = {scale}", char="█")
+        scale_args = ["--jitter-scale", scale]
 
-        print()
-        print(f"  ---- LOO (once per sigma):  {' '.join(LOCAL_DATASETS)} ----")
-        run(
-            [
-                PY,
-                "scripts/run_row_probe.py",
-                *local_args,
-                "--split-mode",
-                "loo",
-                "--k-list",
-                K_LIST,
-                "--seeds",
-                SEEDS_CSV,
-                "--jitter-sigma",
-                sigma,
-                *FRESH_FLAG,
-                "-v",
-            ]
-        )
-
-        for test_size in TEST_SIZES:
-            combo += 1
-            section(
-                f"({combo}/{total})  sigma={sigma}  "
-                f"test_size={test_size}  seeds={SEEDS_CSV}"
-            )
+        for sigma in JITTER_SIGMAS:
+            banner(f"scale={scale}  ·  SIGMA = {sigma}")
 
             print()
-            print(
-                f"  ---- PROP: {' '.join(OPENML_DATASETS)}  test_size={test_size} ----"
-            )
+            print(f"  ---- LOO (once per scale·sigma):  {' '.join(LOCAL_DATASETS)} ----")
             run(
                 [
                     PY,
                     "scripts/run_row_probe.py",
-                    *openml_args,
+                    *local_args,
                     "--split-mode",
-                    "proportional",
-                    "--test-size",
-                    test_size,
+                    "loo",
                     "--k-list",
                     K_LIST,
                     "--seeds",
                     SEEDS_CSV,
                     "--jitter-sigma",
                     sigma,
+                    *scale_args,
                     *FRESH_FLAG,
                     "-v",
                 ]
             )
 
+            for test_size in TEST_SIZES:
+                combo += 1
+                section(
+                    f"({combo}/{total})  scale={scale}  sigma={sigma}  "
+                    f"test_size={test_size}  seeds={SEEDS_CSV}"
+                )
+
+                print()
+                print(
+                    f"  ---- PROP: {' '.join(OPENML_DATASETS)}  "
+                    f"test_size={test_size} ----"
+                )
+                run(
+                    [
+                        PY,
+                        "scripts/run_row_probe.py",
+                        *openml_args,
+                        "--split-mode",
+                        "proportional",
+                        "--test-size",
+                        test_size,
+                        "--k-list",
+                        K_LIST,
+                        "--seeds",
+                        SEEDS_CSV,
+                        "--jitter-sigma",
+                        sigma,
+                        *scale_args,
+                        *FRESH_FLAG,
+                        "-v",
+                    ]
+                )
+
     print()
     print("=" * 80)
-    print("  Regenerating PNGs across all sigma subtrees (single pass)")
+    print("  Regenerating PNGs across all (scale × sigma) subtrees (single pass)")
     print("=" * 80)
     run([PY, "scripts/rebuild_reports.py", "-v"])
 
     print()
     print("=================== ALL DONE ===================")
-    print(f"Total combos: {total}  (sigma × test_size)")
+    print(
+        f"Total combos: {total}  "
+        f"(jitter_scale × sigma × test_size = "
+        f"{len(JITTER_SCALES)} × {len(JITTER_SIGMAS)} × {len(TEST_SIZES)})"
+    )
+    print(f"Jitter scales: {', '.join(JITTER_SCALES)}")
     print(f"Seeds per combo: {SEEDS_CSV}  (N={len(SEEDS)})")
     print()
     print("View the unified report (live, on-demand) with:")

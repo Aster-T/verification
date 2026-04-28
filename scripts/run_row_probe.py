@@ -21,7 +21,8 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "third-party" / "tabpfn" / "src"))
 
 from src.configs import (  # noqa: E402
-    CONFIG, add_openml_cli_args, resolve_openml_args, sigma_tag, test_size_tag,
+    CONFIG, VALID_JITTER_SCALES, add_openml_cli_args, jitter_scale_tag,
+    resolve_openml_args, sigma_tag, test_size_tag,
 )
 from src.probing.row_probe import VALID_SPLIT_MODES, run_row_probe  # noqa: E402
 
@@ -91,6 +92,18 @@ def main() -> None:
         "used only when 'jitter' is in --modes.",
     )
     p.add_argument(
+        "--jitter-scale",
+        choices=list(VALID_JITTER_SCALES),
+        default=str(rp.get("jitter_scale", "absolute")),
+        help="How σ relates to per-column scale in mode=jitter. "
+        "'absolute' (default, legacy): noise = N(0, σ²) for every numeric "
+        "cell. 'per_col_std': noise per column scaled by that column's std "
+        "on the untiled X — σ becomes a relative perturbation strength. "
+        "Non-default values get their own subtree "
+        "(<out>/sigma_<σ>/jitter_<scale>/...) so absolute and per_col_std "
+        "results coexist as independent ablation runs.",
+    )
+    p.add_argument(
         "--out",
         type=Path,
         default=REPO / "results",
@@ -128,15 +141,26 @@ def main() -> None:
     # When --jitter-sigma is given, partition the results tree by sigma so
     # sweeping multiple sigmas doesn't overwrite each other:
     #   <out>/sigma_<σ>/<dataset>/row/...
+    # When --jitter-scale != "absolute", insert a jitter_<scale>/ layer so
+    # absolute and per_col_std runs (the two ablation siblings) live in
+    # disjoint subtrees:
+    #   <out>/sigma_<σ>/jitter_<scale>/<dataset>/row/...
+    # The "absolute" default has no extra layer — pre-existing trees stay
+    # bit-for-bit compatible.
     # In proportional mode we additionally partition by test_size so the
     # 9 test_size sweep produces 9 distinct result subtrees:
-    #   <out>/sigma_<σ>/test_size_<ts>/<dataset>/row/...
+    #   <out>/sigma_<σ>/[jitter_<scale>/]test_size_<ts>/<dataset>/row/...
     # LOO output paths are NOT partitioned by test_size (LOO ignores it).
     out_root = args.out
     if args.jitter_sigma is not None:
         out_root = out_root / f"sigma_{sigma_tag(args.jitter_sigma)}"
         logging.warning("jitter_sigma=%s -> results under %s",
                         args.jitter_sigma, out_root)
+    scale_subdir = jitter_scale_tag(args.jitter_scale)
+    if scale_subdir is not None:
+        out_root = out_root / scale_subdir
+        logging.warning("jitter_scale=%s -> results under %s",
+                        args.jitter_scale, out_root)
     if args.split_mode == "proportional":
         out_root = out_root / f"test_size_{test_size_tag(args.test_size)}"
         logging.warning("test_size=%s -> proportional results under %s",
@@ -158,6 +182,7 @@ def main() -> None:
             split_mode=args.split_mode,
             test_size=args.test_size,
             jitter_sigma=args.jitter_sigma,
+            jitter_scale=args.jitter_scale,
             tabpfn_numeric=args.tabpfn_numeric,
         )
 

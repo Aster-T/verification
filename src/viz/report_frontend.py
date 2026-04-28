@@ -519,7 +519,8 @@ FRONTEND_HTML = r"""<!doctype html>
   // ---------- State ----------
   const STATE = {
     manifest: null,
-    filters: { sigma: new Set(), test_size: new Set(), dataset: new Set(), chart: new Set() },
+    filters: { sigma: new Set(), test_size: new Set(), dataset: new Set(),
+               jitter_scale: new Set(), chart: new Set() },
     compare: [],   // [{key, src, label}]
     macroCache: new Map(),  // url → {data, ts}
     macroToken: 0,          // incremented to invalidate stale fetches
@@ -605,33 +606,43 @@ FRONTEND_HTML = r"""<!doctype html>
 
   function initFilters() {
     const m = STATE.manifest;
+    const scales = (m.jitter_scales && m.jitter_scales.length)
+      ? m.jitter_scales : ["absolute"];
     const saved = loadFilters();
     if (saved && saved.sigma.size && saved.dataset.size) {
       // restore but intersect with what's currently available
-      STATE.filters.sigma     = new Set([...saved.sigma].filter(v => m.sigmas.includes(v)));
-      STATE.filters.test_size = new Set([...saved.test_size].filter(v => m.test_sizes.includes(v)));
-      STATE.filters.dataset   = new Set([...saved.dataset].filter(v => m.datasets.includes(v)));
-      STATE.filters.chart     = new Set([...saved.chart].filter(v => m.chart_types.some(c => c.id === v)));
+      STATE.filters.sigma        = new Set([...saved.sigma].filter(v => m.sigmas.includes(v)));
+      STATE.filters.test_size    = new Set([...saved.test_size].filter(v => m.test_sizes.includes(v)));
+      STATE.filters.dataset      = new Set([...saved.dataset].filter(v => m.datasets.includes(v)));
+      STATE.filters.jitter_scale = new Set([...(saved.jitter_scale || [])].filter(v => scales.includes(v)));
+      STATE.filters.chart        = new Set([...saved.chart].filter(v => m.chart_types.some(c => c.id === v)));
       // if any dim ended up empty after the intersect, fall through to defaults
       if (STATE.filters.sigma.size && STATE.filters.test_size.size &&
-          STATE.filters.dataset.size && STATE.filters.chart.size) return;
+          STATE.filters.dataset.size && STATE.filters.jitter_scale.size &&
+          STATE.filters.chart.size) return;
     }
     // ----- defaults: just enough to be useful, not so much it floods -----
-    STATE.filters.sigma     = new Set(m.sigmas.slice(0, 1));
-    STATE.filters.test_size = new Set(m.test_sizes.includes("loo") ? ["loo"] : m.test_sizes.slice(0, 1));
-    STATE.filters.dataset   = new Set(m.datasets);
-    STATE.filters.chart     = new Set(m.chart_types.some(c => c.id === "row_curve") ? ["row_curve"] : m.chart_types.slice(0, 1).map(c => c.id));
+    STATE.filters.sigma        = new Set(m.sigmas.slice(0, 1));
+    STATE.filters.test_size    = new Set(m.test_sizes.includes("loo") ? ["loo"] : m.test_sizes.slice(0, 1));
+    STATE.filters.dataset      = new Set(m.datasets);
+    // Default to "absolute" only — keeps the legacy view unchanged on first
+    // load. User flips on per_col_std (or both, for ablation A/B) explicitly.
+    STATE.filters.jitter_scale = new Set(scales.includes("absolute") ? ["absolute"] : scales.slice(0, 1));
+    STATE.filters.chart        = new Set(m.chart_types.some(c => c.id === "row_curve") ? ["row_curve"] : m.chart_types.slice(0, 1).map(c => c.id));
     saveFilters();
   }
 
   // ---------- Filter UI ----------
   function renderFilterUI() {
     const m = STATE.manifest;
+    const scales = (m.jitter_scales && m.jitter_scales.length)
+      ? m.jitter_scales : ["absolute"];
     const groups = [
-      {dim: "sigma",     title: "σ (jitter)",  values: m.sigmas.map(v => ({id: v, label: v}))},
-      {dim: "test_size", title: "test_size",   values: m.test_sizes.map(v => ({id: v, label: v === "loo" ? "LOO" : v}))},
-      {dim: "dataset",   title: "Dataset",     values: m.datasets.map(v => ({id: v, label: v}))},
-      {dim: "chart",     title: "Chart type",  values: m.chart_types.map(c => ({id: c.id, label: c.label}))},
+      {dim: "sigma",        title: "σ (jitter)",   values: m.sigmas.map(v => ({id: v, label: v}))},
+      {dim: "test_size",    title: "test_size",    values: m.test_sizes.map(v => ({id: v, label: v === "loo" ? "LOO" : v}))},
+      {dim: "dataset",      title: "Dataset",      values: m.datasets.map(v => ({id: v, label: v}))},
+      {dim: "jitter_scale", title: "Jitter scale", values: scales.map(v => ({id: v, label: v}))},
+      {dim: "chart",        title: "Chart type",   values: m.chart_types.map(c => ({id: c.id, label: c.label}))},
     ];
     const grid = document.getElementById("filter-grid");
     grid.innerHTML = "";
@@ -678,9 +689,16 @@ FRONTEND_HTML = r"""<!doctype html>
     const set = STATE.filters[dim];
     if (a.dataset.act === "all") {
       // re-derive available values from manifest dimension
-      const avail = (dim === "chart")
-        ? STATE.manifest.chart_types.map(c => c.id)
-        : STATE.manifest[dim === "sigma" ? "sigmas" : (dim === "dataset" ? "datasets" : "test_sizes")];
+      let avail;
+      if (dim === "chart") {
+        avail = STATE.manifest.chart_types.map(c => c.id);
+      } else if (dim === "jitter_scale") {
+        avail = (STATE.manifest.jitter_scales && STATE.manifest.jitter_scales.length)
+          ? STATE.manifest.jitter_scales : ["absolute"];
+      } else {
+        avail = STATE.manifest[dim === "sigma" ? "sigmas"
+                : (dim === "dataset" ? "datasets" : "test_sizes")];
+      }
       avail.forEach(v => set.add(v));
     } else {
       set.clear();
@@ -704,15 +722,22 @@ FRONTEND_HTML = r"""<!doctype html>
   }
 
   // ---------- Filter predicates ----------
+  // Items written by older servers may not carry `jitter_scale`; treat
+  // missing as "absolute" (the only scale the legacy pipeline produced).
+  function itemScale(it) {
+    return it.jitter_scale || "absolute";
+  }
   function passesImageFilter(it) {
     const f = STATE.filters;
     return f.sigma.has(it.sigma) && f.test_size.has(it.test_size)
-        && f.dataset.has(it.dataset) && f.chart.has(it.chart);
+        && f.dataset.has(it.dataset) && f.chart.has(it.chart)
+        && f.jitter_scale.has(itemScale(it));
   }
   function passesTableFilter(it) {
     const f = STATE.filters;
     return f.sigma.has(it.sigma) && f.test_size.has(it.test_size)
-        && f.dataset.has(it.dataset);
+        && f.dataset.has(it.dataset)
+        && f.jitter_scale.has(itemScale(it));
   }
 
   // ---------- Gallery ----------
@@ -729,10 +754,14 @@ FRONTEND_HTML = r"""<!doctype html>
     const html = items.map(it => {
       const key = it.url;  // url is unique per image
       const inCompare = compareSet.has(key);
+      const scale = itemScale(it);
+      const scaleTag = scale === "absolute"
+        ? "" : `<span>scale ${escapeHtml(scale)}</span>`;
       const tags = `
         <div class="tags">
           <span>σ ${escapeHtml(it.sigma)}</span>
           <span>${it.test_size === "loo" ? "LOO" : "test_size " + escapeHtml(it.test_size)}</span>
+          ${scaleTag}
         </div>`;
       return `
         <div class="image-card">
@@ -759,12 +788,16 @@ FRONTEND_HTML = r"""<!doctype html>
   }
 
   function captionLabel(it) {
-    return `${it.dataset} · σ=${it.sigma} · ${it.test_size === "loo" ? "LOO" : "ts=" + it.test_size} · ${it.label}`;
+    const scale = itemScale(it);
+    const scalePart = scale === "absolute" ? "" : ` · scale=${scale}`;
+    return `${it.dataset} · σ=${it.sigma} · ${it.test_size === "loo" ? "LOO" : "ts=" + it.test_size}${scalePart} · ${it.label}`;
   }
 
   function imageSortKey(a, b) {
     if (a.dataset !== b.dataset) return a.dataset.localeCompare(b.dataset);
     if (a.sigma   !== b.sigma)   return a.sigma.localeCompare(b.sigma);
+    const sa = itemScale(a), sb = itemScale(b);
+    if (sa !== sb) return sa.localeCompare(sb);
     if (a.test_size !== b.test_size) {
       if (a.test_size === "loo") return -1;
       if (b.test_size === "loo") return 1;
@@ -892,8 +925,9 @@ FRONTEND_HTML = r"""<!doctype html>
 
     const fmt = s => {
       if (!s || s.n === 0) return "—";
-      if (s.n === 1) return s.mean.toFixed(3);
-      return `${s.mean.toFixed(3)} ± ${s.std.toFixed(3)}`;
+      const dp = decimalPlaces();
+      if (s.n === 1) return s.mean.toFixed(dp);
+      return `${s.mean.toFixed(dp)} ± ${s.std.toFixed(dp)}`;
     };
     const fmtInt = v => (v === null || v === undefined) ? "—" : String(v);
     const rows = data.rows.map(r => {
@@ -922,20 +956,24 @@ FRONTEND_HTML = r"""<!doctype html>
 
   // ---------- Macro summary ----------
   function computeMacroPairs() {
-    // Returns one entry per (σ, dataset) covered by the current filters.
-    // Each entry also keeps the jsonls bucketed by test_size so the card
-    // can render an overall row plus a per-test_size breakdown without
-    // needing a new endpoint.
+    // Returns one entry per (σ, jitter_scale, dataset) covered by the
+    // current filters — splitting by scale so absolute vs per_col_std
+    // ablations show up as separate cards instead of being averaged
+    // together. Each entry buckets jsonls by test_size for the per-ts
+    // drilldown.
     const f = STATE.filters;
     const pairs = new Map();
     for (const t of STATE.manifest.tables) {
       if (!f.sigma.has(t.sigma)) continue;
       if (!f.test_size.has(t.test_size)) continue;
       if (!f.dataset.has(t.dataset)) continue;
-      const key = t.sigma + "|" + t.dataset;
+      const scale = itemScale(t);
+      if (!f.jitter_scale.has(scale)) continue;
+      const key = t.sigma + "|" + scale + "|" + t.dataset;
       let entry = pairs.get(key);
       if (!entry) {
         entry = { sigma: t.sigma, dataset: t.dataset,
+                  jitter_scale: scale,
                   byTs: new Map(), allJsonls: [] };
         pairs.set(key, entry);
       }
@@ -945,7 +983,8 @@ FRONTEND_HTML = r"""<!doctype html>
     }
     return Array.from(pairs.values()).sort((a, b) => {
       if (a.dataset !== b.dataset) return a.dataset.localeCompare(b.dataset);
-      return a.sigma.localeCompare(b.sigma);
+      if (a.sigma   !== b.sigma)   return a.sigma.localeCompare(b.sigma);
+      return a.jitter_scale.localeCompare(b.jitter_scale);
     });
   }
 
@@ -1005,12 +1044,13 @@ FRONTEND_HTML = r"""<!doctype html>
 
   function macroNum(x) {
     if (x === null || x === undefined || Number.isNaN(x)) return "—";
+    const dp = decimalPlaces();
     const a = Math.abs(x);
     // Scientific for very large / very small magnitudes — keeps cells short.
     if (a !== 0 && (a >= 1e4 || a < 1e-3)) {
-      return x.toExponential(3).replace("e+", "e").replace("e-0", "e-");
+      return x.toExponential(dp).replace("e+", "e").replace("e-0", "e-");
     }
-    return x.toFixed(3);
+    return x.toFixed(dp);
   }
   function macroFmt(s) {
     if (!s || s.n === 0) return "—";
@@ -1039,9 +1079,13 @@ FRONTEND_HTML = r"""<!doctype html>
   function renderMacroCard(pair, overall, perTs) {
     const skipNote = overall.n_skipped
       ? ' <span class="n">' + overall.n_skipped + ' skipped</span>' : "";
+    const scaleTag = (pair.jitter_scale && pair.jitter_scale !== "absolute")
+      ? '<span class="sig">scale=' + escapeHtml(pair.jitter_scale) + '</span>'
+      : "";
     const headHtml = '<div class="macro-head">'
       + '<span class="ds">' + escapeHtml(pair.dataset) + '</span>'
       + '<span class="sig">σ=' + escapeHtml(pair.sigma) + '</span>'
+      + scaleTag
       + '<span class="n">' + overall.n_records + ' rec'
       + (overall.n_records === 1 ? "" : "s") + skipNote + '</span>'
       + '</div>';
@@ -1098,6 +1142,12 @@ FRONTEND_HTML = r"""<!doctype html>
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
   function escapeAttr(s) { return escapeHtml(s); }
+
+  // ---------- Numeric display precision (sourced from CONFIG.viz.decimal_places via /manifest.json) ----------
+  function decimalPlaces() {
+    const dp = STATE.manifest && STATE.manifest.decimal_places;
+    return Number.isInteger(dp) && dp >= 0 ? dp : 4;
+  }
 
   // ---------- Lightbox: click any chart to zoom; Esc/click outside to close ----------
   (function setupLightbox() {

@@ -133,6 +133,16 @@ CONFIG = {
         "modes": ["exact", "jitter"],
         "seeds": [42],
         "jitter_sigma": 1e-6,
+        # Jitter noise scaling strategy for `mode == "jitter"`:
+        #   "absolute"    -> noise = N(0, σ²) independent of column scale
+        #                    (legacy behavior; one σ for every numeric cell).
+        #   "per_col_std" -> noise = N(0, (σ · std_j)²) for column j, with
+        #                    std_j computed on the **untiled** X. Makes σ
+        #                    a relative perturbation strength so the same
+        #                    σ behaves comparably across datasets/columns
+        #                    of vastly different magnitudes.
+        # `exact` mode is unaffected by this knob (it never adds noise).
+        "jitter_scale": "absolute",
         "metrics": ["r2", "rmse", "mae"],
     },
     # -------------------------------------------------------------------------
@@ -144,6 +154,12 @@ CONFIG = {
         "figsize_heatmap_triptych": (15, 5),
         "figsize_curve": (16, 9),
         "dpi": 150,
+        # Decimal precision used by the frontend for displayed numbers
+        # (data tables + macro cards). Plumbed to JS via /manifest.json.
+        # Both `.toFixed(dp)` and `.toExponential(dp)` consume this same
+        # value so cells in fixed and scientific notation stay consistent.
+        # Edit this to taste — no rerun needed; just refresh the browser.
+        "decimal_places": 4,
     },
 }
 
@@ -418,6 +434,25 @@ def sigma_tag(sigma: float) -> str:
     else:
         m_out = f"{m:g}".rstrip("0").rstrip(".")
     return f"{m_out}e{e}"
+
+
+VALID_JITTER_SCALES: tuple[str, ...] = ("absolute", "per_col_std")
+
+
+def jitter_scale_tag(scale: str) -> str | None:
+    """Return the path-fragment tag for a jitter_scale value, or None when
+    `scale == "absolute"` (the legacy default — no extra subdirectory so
+    pre-existing results trees are preserved bit-for-bit).
+
+    Examples:
+      jitter_scale_tag("absolute")    -> None
+      jitter_scale_tag("per_col_std") -> "jitter_per_col_std"
+    """
+    if scale not in VALID_JITTER_SCALES:
+        raise ValueError(
+            f"jitter_scale must be one of {VALID_JITTER_SCALES!r}, got {scale!r}"
+        )
+    return None if scale == "absolute" else f"jitter_{scale}"
 
 
 def test_size_tag(test_size: float) -> str:
