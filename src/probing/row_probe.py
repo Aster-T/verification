@@ -348,20 +348,65 @@ def _fit_predict_mlr(X_ctx, y_ctx, X_te, is_nominal):
     return y_pred, fit_sec, predict_sec
 
 
+def _prep_tabpfn_X(X, *, accept_text: bool):
+    """Hand TabPFN an input that lets it see each column under its true
+    dtype.
+
+    - Numeric ndarrays pass through.
+    - Object ndarrays with `accept_text=True` are wrapped into a pandas
+      DataFrame, with text columns kept as object and numeric columns
+      coerced to float; TabPFN's own categorical handling kicks in for
+      the text columns.
+    - With `accept_text=False` (i.e. CLI --tabpfn-numeric) we cast the
+      whole object array to float so non-numeric values surface as NaN
+      and TabPFN treats every column as numeric.
+    """
+    X_arr = np.asarray(X)
+    if X_arr.dtype != object:
+        return X_arr
+    if not accept_text:
+        return X_arr.astype(np.float64)
+    import pandas as pd  # noqa: PLC0415  (lazy)
+
+    df = pd.DataFrame(X_arr).copy()
+    for j in range(df.shape[1]):
+        col = df.iloc[:, j]
+        if not any(isinstance(v, str) for v in col):
+            df.iloc[:, j] = pd.to_numeric(col, errors="coerce")
+    return df
+
+
 def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed, *, accept_text: bool = True):
-    from src.models.tabpfn_wrapper import TabPFNWithColAttn  # noqa: PLC0415
+    """Row-probe path: use TabPFNRegressor straight from the box with its
+    default inference config (default n_estimators ensemble, default
+    PREPROCESS_TRANSFORMS / FEATURE_SHIFT / POLYNOMIAL_FEATURES / etc).
+
+    Why not the column-probe wrapper TabPFNWithColAttn:
+      - That wrapper hardcodes n_estimators=1 and disables every TabPFN
+        feature that would shuffle / augment columns, because column
+        probing needs the captured attention matrix to stay axis-aligned
+        with the input column order.
+      - Row probing doesn't consume attention; it only consumes
+        predictions. Forcing n_estimators=1 + zero-augmentation actively
+        hurts predictive accuracy with no upside, so this path uses
+        TabPFN's stock ensemble instead.
+    """
+    from tabpfn import TabPFNRegressor  # noqa: PLC0415
+
+    X_ctx_in = _prep_tabpfn_X(X_ctx, accept_text=accept_text)
+    X_te_in = _prep_tabpfn_X(X_te, accept_text=accept_text)
+    y_ctx_in = np.asarray(y_ctx, dtype=np.float64).ravel()
 
     t0 = time.perf_counter()
-    # preprocess_y=True restores TabPFN's default (None, "safepower") y-preprocess
-    # ensemble, which row probing needs for heavy-tailed targets. Column probing
-    # keeps it disabled for attention alignment.
-    m = TabPFNWithColAttn(
-        device=get_device(), seed=seed,
-        accept_text=accept_text, preprocess_y=True,
-    ).fit(X_ctx, y_ctx)
+    m = TabPFNRegressor(
+        device=get_device(),
+        random_state=int(seed),
+        ignore_pretraining_limits=True,
+    )
+    m.fit(X_ctx_in, y_ctx_in)
     fit_sec = time.perf_counter() - t0
     t0 = time.perf_counter()
-    y_pred = m.predict(X_te)
+    y_pred = m.predict(X_te_in)
     predict_sec = time.perf_counter() - t0
     return y_pred, fit_sec, predict_sec
 

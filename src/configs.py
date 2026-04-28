@@ -104,15 +104,18 @@ CONFIG = {
     # -------------------------------------------------------------------------
     "datasets": {},
     # -------------------------------------------------------------------------
-    # TabPFN settings shared across probes
+    # TabPFN settings.
     #
-    # n_estimators MUST stay at 1 for both column_probe (feature-order
-    # alignment with MLR) and row_probe (avoid ensemble smoothing the
-    # context-size effect we want to measure).
+    # `n_estimators` is left here for documentation only and is no longer
+    # consumed at runtime. Probe-specific values live where they're enforced:
+    #   - column_probe: hard-coded to 1 inside TabPFNWithColAttn (must stay
+    #     1 for column-attention to remain axis-aligned with input features).
+    #   - row_probe:   uses TabPFN's stock ensemble default (no override),
+    #     since the row probe consumes only predictions, not attention, and
+    #     the n=1 single-estimator path actively hurts predictive accuracy.
     # -------------------------------------------------------------------------
     "tabpfn": {
         "device": "cuda",
-        "n_estimators": 1,
         "ignore_pretraining_limits": True,
     },
     # -------------------------------------------------------------------------
