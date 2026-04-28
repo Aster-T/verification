@@ -59,8 +59,11 @@ OUTPUT LAYOUT (for a given dataset, under `row_dir`):
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import logging
+import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -78,6 +81,84 @@ from src.utils.seed import set_seed
 logger = logging.getLogger(__name__)
 
 VALID_SPLIT_MODES = ("proportional", "loo")
+
+
+# ---------------------------------------------------------------------------
+# Per-thread CUDA stream + BLAS thread budget — what makes parallel_k>1 actually
+# concurrent rather than just queue-up-and-wait.
+# ---------------------------------------------------------------------------
+# Why a per-thread CUDA stream:
+#   PyTorch's "current stream" is per-thread but defaults to stream 0 (the
+#   legacy default stream) on every thread. Kernels submitted to stream 0
+#   from different threads still serialize on the GPU's command queue, so
+#   K worker threads without explicit streams give zero GPU concurrency —
+#   you only pay the threading overhead. Allocating one Stream() per worker
+#   thread (cached in thread-local so it survives across folds) lets the
+#   driver's SM scheduler actually interleave kernels from different
+#   workers.
+#
+# Why a BLAS thread budget:
+#   TabPFN's fit() runs sklearn-side preprocessing under
+#   OpenMP / MKL / OpenBLAS, which by default each spawn `cpu_count` threads.
+#   With K=5 workers on a 32-core box that's 5×32=160 BLAS threads
+#   competing for 32 cores — context-switching dominates and parallel runs
+#   end up slower than serial. `threadpoolctl.threadpool_limits` clamps the
+#   per-pool count so K · limit ≈ cpu_count and oversubscription disappears.
+_thread_local = threading.local()
+
+
+def _get_thread_cuda_stream():
+    """Lazily create one CUDA stream per Python thread, cached in thread-
+    local storage. Returns None when CUDA is unavailable (the worker then
+    falls through to the default-stream path, which is fine for CPU-only
+    runs)."""
+    import torch  # noqa: PLC0415
+
+    if not torch.cuda.is_available():
+        return None
+    stream = getattr(_thread_local, "stream", None)
+    if stream is None:
+        stream = torch.cuda.Stream()
+        _thread_local.stream = stream
+    return stream
+
+
+def _cuda_stream_ctx():
+    """Context manager that pins the current thread's CUDA ops to that
+    thread's dedicated Stream. Falls back to a no-op when CUDA isn't
+    available (keeps test paths and CPU-only runs working unchanged)."""
+    stream = _get_thread_cuda_stream()
+    if stream is None:
+        return contextlib.nullcontext()
+    import torch  # noqa: PLC0415
+
+    return torch.cuda.stream(stream)
+
+
+def _blas_budget_ctx(parallel_k: int):
+    """Cap BLAS pool sizes so K workers · limit ≈ cpu_count. Returns a
+    no-op context when parallel_k <= 1 (legacy serial behaviour) or when
+    threadpoolctl isn't installed (the budget is best-effort; a missing
+    threadpoolctl just means parallel runs may still oversubscribe)."""
+    if parallel_k <= 1:
+        return contextlib.nullcontext()
+    try:
+        from threadpoolctl import threadpool_limits  # noqa: PLC0415
+    except ImportError:
+        logger.warning(
+            "threadpoolctl not installed; running parallel_k=%d without "
+            "BLAS thread limits — expect oversubscription on multi-core boxes",
+            parallel_k,
+        )
+        return contextlib.nullcontext()
+    n_cpu = os.cpu_count() or 1
+    limit = max(1, n_cpu // parallel_k)
+    logger.info(
+        "BLAS budget: limiting OpenMP/MKL/OpenBLAS pools to %d threads each "
+        "(parallel_k=%d, cpu_count=%d)",
+        limit, parallel_k, n_cpu,
+    )
+    return threadpool_limits(limits=limit)
 
 # Datasets where we additionally compute MAPE restricted to tanker rows.
 # `ship-tanker` is excluded because it already contains only tankers
@@ -429,17 +510,22 @@ def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed, *, accept_text: bool = True):
     X_te_in = _prep_tabpfn_X(X_te, accept_text=accept_text)
     y_ctx_in = np.asarray(y_ctx, dtype=np.float64).ravel()
 
-    t0 = time.perf_counter()
-    m = TabPFNRegressor(
-        device=get_device(),
-        random_state=int(seed),
-        ignore_pretraining_limits=True,
-    )
-    m.fit(X_ctx_in, y_ctx_in)
-    fit_sec = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    y_pred = m.predict(X_te_in)
-    predict_sec = time.perf_counter() - t0
+    # Pin every CUDA op in this call to the current thread's dedicated
+    # stream. Without this, kernels from concurrent workers serialize on
+    # the GPU's default stream and parallel_k>1 buys nothing — see the
+    # _get_thread_cuda_stream comment for the longer explanation.
+    with _cuda_stream_ctx():
+        t0 = time.perf_counter()
+        m = TabPFNRegressor(
+            device=get_device(),
+            random_state=int(seed),
+            ignore_pretraining_limits=True,
+        )
+        m.fit(X_ctx_in, y_ctx_in)
+        fit_sec = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        y_pred = m.predict(X_te_in)
+        predict_sec = time.perf_counter() - t0
     return y_pred, fit_sec, predict_sec
 
 
@@ -628,7 +714,10 @@ def _run_proportional(
             # All writes happen on the main thread (inside _process, called
             # from the as_completed iterator), so jsonl/CSV stay single-
             # writer without explicit locking. Workers are pure compute.
-            with ThreadPoolExecutor(max_workers=parallel_k) as pool:
+            # _blas_budget_ctx caps BLAS pool sizes to cpu_count // K so K
+            # workers running TabPFN preprocessing don't oversubscribe the
+            # CPU; without it parallel_k>1 is typically slower than serial.
+            with _blas_budget_ctx(parallel_k), ThreadPoolExecutor(max_workers=parallel_k) as pool:
                 futs = {
                     pool.submit(_compute, k, mode, model): (k, mode, model)
                     for k, mode, model in tasks
@@ -767,7 +856,10 @@ def _run_loo(
                             if not _consume(i, y_pred, fs, ps):
                                 break
                     else:
-                        with ThreadPoolExecutor(max_workers=parallel_k) as pool:
+                        # _blas_budget_ctx prevents BLAS oversubscription when
+                        # K folds run TabPFN preprocessing concurrently — see
+                        # _blas_budget_ctx docstring for the math.
+                        with _blas_budget_ctx(parallel_k), ThreadPoolExecutor(max_workers=parallel_k) as pool:
                             futs = {pool.submit(_fold, i): i for i in range(n)}
                             try:
                                 for fut in as_completed(futs):
