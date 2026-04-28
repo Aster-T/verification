@@ -268,9 +268,9 @@ def _plot_combined(ax, series, skips, *,
         ax.axhline(flat, color=_COLORS[("mlr", "exact")],
                    alpha=0.35, linestyle=":")
         ax.text(
-            0.015, 0.97,
+            0.985, 0.97,
             f"OLS invariant to uniform duplication  (≈ {flat:.3f})",
-            transform=ax.transAxes, ha="left", va="top", fontsize=8,
+            transform=ax.transAxes, ha="right", va="top", fontsize=8,
             color=_COLORS[("mlr", "exact")],
             bbox=dict(boxstyle="round,pad=0.3", fc="white",
                       ec=_COLORS[("mlr", "exact")], lw=0.5, alpha=0.9),
@@ -305,7 +305,7 @@ def _plot_combined(ax, series, skips, *,
             for lanes in series.values()
         ])
         _apply_ylim_with_floor(ax, all_means)
-    ax.legend(loc="upper right", frameon=True, framealpha=0.92,
+    ax.legend(loc="upper left", frameon=True, framealpha=0.92,
               edgecolor="#aaaaaa",
               handlelength=3.5,   # show enough line for dash/solid to be obvious
               handleheight=1.2,
@@ -375,9 +375,9 @@ def _plot_per_model(ax, model, series, skips, *,
         ax.axhline(flat, color=_COLORS[("mlr", "exact")],
                    alpha=0.35, linestyle=":")
         ax.text(
-            0.015, 0.97,
+            0.985, 0.97,
             f"OLS invariant to uniform duplication  (≈ {flat:.3f})",
-            transform=ax.transAxes, ha="left", va="top", fontsize=8,
+            transform=ax.transAxes, ha="right", va="top", fontsize=8,
             color=_COLORS[("mlr", "exact")],
             bbox=dict(boxstyle="round,pad=0.3", fc="white",
                       ec=_COLORS[("mlr", "exact")], lw=0.5, alpha=0.9),
