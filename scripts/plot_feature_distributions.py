@@ -53,27 +53,49 @@ from src.data.loaders import load_dataset_full  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+# Threshold above which a mostly-numeric object column with stray non-
+# numeric cells (e.g. a single "d" placeholder among floats) is still
+# treated as numeric. Below it, the column is rendered as categorical.
+# 0.8 catches the common case of "13/14 floats + 1 typo" without grabbing
+# columns where numbers and labels are genuinely mixed.
+_NUMERIC_THRESHOLD = 0.8
+
+
 def _is_numeric_column(col: np.ndarray) -> bool:
-    """Decide whether a column from an object ndarray is numeric. Catches
-    columns that the loader passed through as object dtype but are actually
-    floats."""
+    """Decide whether a column should be plotted as numeric. Catches
+    columns that the loader returned as object dtype but are *mostly*
+    floats — a stray non-numeric cell (e.g. "d", "n/a", "?") shouldn't
+    flip the column into categorical-only mode and rob the user of the
+    box plot. Pure-text columns (ship names etc.) parse 0% and stay
+    categorical."""
     if col.dtype.kind in ("i", "u", "f"):
         return True
-    # Object dtype: scan a few values.
-    if col.dtype == object:
-        for v in col[: min(len(col), 50)]:
-            if isinstance(v, str):
-                return False
-        return True
-    return False
+    if col.dtype != object:
+        return False
+    n = len(col)
+    if n == 0:
+        return False
+    # pd.to_numeric maps unparseable cells (incl. None) to NaN.
+    coerced = pd.to_numeric(pd.Series(col), errors="coerce")
+    n_numeric = int(coerced.notna().sum())
+    return (n_numeric / n) >= _NUMERIC_THRESHOLD
 
 
-def _column_to_float(col: np.ndarray) -> np.ndarray:
-    """Coerce a numeric-looking column to float64, dropping NaNs/Infs at
-    plot time (boxplot handles those, but we want the descriptive stats
-    to be clean)."""
-    arr = np.asarray(col, dtype=np.float64)
-    return arr[np.isfinite(arr)]
+def _coerce_numeric(col: np.ndarray) -> tuple[np.ndarray, int]:
+    """Coerce a numeric-looking column to float64 and drop non-finite
+    cells. Stray non-numeric strings (e.g. "d") become NaN via pandas
+    coercion before the drop.
+
+    Returns (finite_values, n_dropped) so the caller can annotate the
+    plot with how many cells were thrown away — distinguishes "column
+    has a few NaN datapoints" from "column has a typo we coerced"."""
+    if col.dtype.kind in ("i", "u", "f"):
+        arr = np.asarray(col, dtype=np.float64)
+    else:
+        arr = pd.to_numeric(pd.Series(col), errors="coerce")\
+                .to_numpy(dtype=np.float64)
+    finite_mask = np.isfinite(arr)
+    return arr[finite_mask], int((~finite_mask).sum())
 
 
 # Font family names we know cover CJK. Order = preference: prefer
@@ -164,7 +186,8 @@ def _set_rc() -> None:
 
 def _plot_numeric(ax, col: np.ndarray, title: str, *, color: str) -> None:
     """Single-column box plot with descriptive-stats footer."""
-    vals = _column_to_float(col)
+    n_total = len(col)
+    vals, n_dropped = _coerce_numeric(col)
     if vals.size == 0:
         ax.text(0.5, 0.5, "no finite values", ha="center", va="center",
                 transform=ax.transAxes, color="#888")
@@ -199,8 +222,12 @@ def _plot_numeric(ax, col: np.ndarray, title: str, *, color: str) -> None:
     ax.spines["right"].set_visible(False)
     ax.spines["bottom"].set_visible(False)
     # Footer: n / mean ± std / [min, max]
+    n_str = (
+        f"n={vals.size}/{n_total}  ({n_dropped} non-numeric)"
+        if n_dropped > 0 else f"n={vals.size}"
+    )
     footer = (
-        f"n={vals.size}  "
+        f"{n_str}  "
         f"μ={vals.mean():.3g} ± {vals.std(ddof=0):.3g}\n"
         f"[{vals.min():.3g},  {vals.max():.3g}]"
     )
