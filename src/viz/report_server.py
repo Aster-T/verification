@@ -80,6 +80,29 @@ def _parse_jitter_scale_dir(name: str) -> str | None:
     return name[len("jitter_"):] if name.startswith("jitter_") else None
 
 
+def _discover_feature_distributions(
+    results_root: Path,
+) -> list[dict[str, str]]:
+    """Find every `results/feature_distributions/<dataset>.png` and return
+    them as manifest entries. These PNGs are dataset-level facts (they
+    don't depend on σ / test_size / jitter_scale), so they sit outside the
+    main image-table schema and live in their own manifest section."""
+    fd_dir = results_root / "feature_distributions"
+    if not fd_dir.is_dir():
+        return []
+    out: list[dict[str, str]] = []
+    for png in sorted(fd_dir.glob("*.png")):
+        if not png.is_file():
+            continue
+        rel = png.relative_to(results_root)
+        out.append({
+            "dataset": png.stem,
+            "label": f"{png.stem} · feature distribution",
+            "url": f"/results/{rel.as_posix()}",
+        })
+    return out
+
+
 def _scan_viz(viz_dir: Path) -> list[str]:
     """Return chart-type ids (`_CHART_FILES` keys) whose PNG exists in
     `viz_dir`."""
@@ -244,6 +267,12 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
                 continue
             scan_base(scale_dir, sigma, scale)
 
+    feature_dists = _discover_feature_distributions(results_root)
+    # Some datasets may have a feature_dist PNG but no probe results yet
+    # — surface them in the dataset filter so the user can still see them.
+    for fd in feature_dists:
+        datasets.add(fd["dataset"])
+
     return {
         "sigmas": sorted(sigmas, key=_sigma_sort_key),
         "test_sizes": _order_test_sizes(test_sizes),
@@ -255,6 +284,7 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
         ],
         "images": images,
         "tables": tables,
+        "feature_distributions": feature_dists,
         "decimal_places": _decimal_places(),
     }
 
@@ -282,6 +312,7 @@ def _empty_manifest() -> dict[str, Any]:
         "sigmas": [], "test_sizes": [], "datasets": [],
         "jitter_scales": [],
         "chart_types": [], "images": [], "tables": [],
+        "feature_distributions": [],
         "decimal_places": _decimal_places(),
     }
 

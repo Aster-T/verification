@@ -6,6 +6,7 @@ CLI 入口集合。每个脚本都是 `if __name__ == "__main__": main()` 的薄
 | 类型 | 脚本 |
 |---|---|
 | 数据准备 | [`export_datasets.py`](#export_datasetspy)、[`infer_meta.py`](#infer_metapy) |
+| 数据观察 | [`plot_feature_distributions.py`](#plot_feature_distributionspy)（特征分布 box plot） |
 | 实验 | [`run_column_probe.py`](#run_column_probepy)、[`run_row_probe.py`](#run_row_probepy) |
 | 一键扫一遍 | [`run_row.py`](#run_rowpy) |
 | 汇报 | [`rebuild_reports.py`](#rebuild_reportspy)（重生成 PNG）、[`serve_report.py`](#serve_reportpy)（起服务看图） |
@@ -29,22 +30,32 @@ CLI 入口集合。每个脚本都是 `if __name__ == "__main__": main()` 的薄
 
 ```
 results/
-  <dataset>/
-    column/                       # run_column_probe.py 的产物
-      mlr.npz                     #   w_vec (F,), w_outer (F,F), feature_names
-      tabpfn.npz                  #   col_attn (F,F), col_attn_per_layer (L,F,F)
-      meta.json
-    row/                          # run_row_probe.py 的产物
-      metrics.jsonl               #   每个 (model, split, k, mode, seed) 一条聚合
-      predictions_<combo>.csv     #   每条非 skip 记录配一份逐点预测
-                                  #   <combo> = <model>_<split>_<mode>_k<k>_s<seed>
-                                  #   列: id, y_true, y_pred, residual
-    viz/                          # rebuild_reports.py 的产物（PNG）
-      side_by_side.png            #   MLR w / w⊗w / TabPFN col-attn 三联
-      tabpfn_per_layer.png        #   TabPFN 每层 attention 网格
-      row_curve.png               #   nRMSE vs k
-      row_curve_<model>_<mode>.png #  4 个 facet 子图
+  feature_distributions/          # plot_feature_distributions.py 的产物
+    <dataset>.png                 #   每数据集一张:每列 box plot + target
+  sigma_<σ>/[jitter_<scale>/]     # σ-分区 + 可选 jitter_scale 子分区
+    <dataset>/                    # LOO + column probe 区(test_size 无关)
+      column/                     #   run_column_probe.py 的产物
+        mlr.npz                   #     w_vec (F,), w_outer (F,F), feature_names
+        tabpfn.npz                #     col_attn (F,F), col_attn_per_layer (L,F,F)
+        meta.json
+      row/                        #   run_row_probe.py 的 LOO 产物
+        metrics.jsonl             #     每个 (model, split, k, mode, seed) 一条聚合
+        predictions_<combo>.csv   #     每条非 skip 记录配一份逐点预测
+                                  #     <combo> = <model>_<split>_<mode>_k<k>_s<seed>
+                                  #     列: id, y_true, y_pred, residual
+      viz/                        #   rebuild_reports.py 的产物 (PNG)
+        side_by_side.png          #     MLR w / w⊗w / TabPFN col-attn 三联
+        tabpfn_per_layer.png      #     TabPFN 每层 attention 网格
+        row_curve.png             #     nRMSE vs n_ctx (4 线 combined)
+        row_curve_<model>.png     #     单模型 (exact + jitter)
+        row_curve_<model>_<mode>.png   #  4 个 facet 子图
+    test_size_<ts>/<dataset>/     # proportional 区(每 test_size 独立)
+      row/metrics.jsonl
+      viz/row_curve*.png
 ```
+
+`jitter_<scale>/` 子层只在非默认(`per_col_std`)时出现;`absolute` 路径保持
+和老版本一致。
 
 > 不再有静态 `report.html` —— 起 `scripts/serve_report.py` 直接看 live 报告。
 
@@ -112,6 +123,44 @@ python scripts/infer_meta.py datasets/ship/data.csv --nominal engine_type,flag
 ```
 
 关键自动行为:target 必须数值;字符串特征默认就地因子化并回写 CSV。
+
+---
+
+## `plot_feature_distributions.py`
+
+每个数据集出一张 PNG,把每个特征当列做 box plot,用来在跑 probe 之前快速看
+列尺度差异、异常值、target 长尾等。文本列改成 top-N value-count 的横向柱状
+图。产物落在 `results/feature_distributions/<dataset>.png`,跟 σ / test_size /
+jitter_scale 都没关系——它是 dataset 级别的事实。
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `--dataset NAME` | - | 已注册数据集名,可重复 |
+| `--openml-*` | - | 共享参数 |
+| `--local-all` | off | 自动扫 `datasets/<name>/meta.json` 全量入列 |
+| `--out PATH` | `results/feature_distributions/` | 输出根 |
+| `--seed INT` | `0` | 给 OpenML 子采样 / `make_regression` 用 |
+| `--cols-per-row N` | `4` | 子图网格宽度 |
+| `--top-categorical N` | `10` | 文本列只画 top-N 高频值 |
+| `--no-target` | off | 不画 target 子图(默认会画,琥珀色与特征蓝区分) |
+| `-v` | off | 详细日志 |
+
+```bash
+# 单个数据集
+python scripts/plot_feature_distributions.py --dataset diabetes
+
+# 本地数据集全量 + 所有 OpenML preset
+python scripts/plot_feature_distributions.py --local-all --openml-all
+```
+
+数值列子图底部带 `n=… μ=… ± …  [min, max]`。数值 nominal 列(整数类别码)
+仍画 box,标题加 `[nominal]` 后缀。`scripts/serve_report.py` 启动后会自动把
+这些 PNG 渲染在 "特征分布" 区(夹在 "宏指标" 和 gallery 之间),由
+**dataset 筛选**驱动,与 σ/test_size/scale 解耦。
+
+字体:已配置 CJK 回退(`Microsoft YaHei` / `PingFang SC` / `Noto Sans CJK SC`
+/ `WenQuanYi Zen Hei` / `SimHei`),含中文列名(如 `船号`)的数据集不会
+出现 missing-glyph 方块。
 
 ---
 
@@ -255,12 +304,17 @@ python scripts/serve_report.py
 # 然后浏览器打开 http://localhost:8000/
 ```
 
+页面区块自上而下:Filters → 宏指标 → **特征分布** → Gallery → Data tables;
+右侧固定 Compare 栏。"特征分布" 区只看 `dataset` 筛选,把
+`results/feature_distributions/<dataset>.png` 直接列出来,点图进 lightbox
+全屏放大,也可以 `+ Compare` 钉到右栏跟其他图并排比。
+
 Endpoints（前端会自己用，调试时可手动访问）：
 
 | 路径 | 说明 |
 |---|---|
 | `GET /` | 单页前端（HTML + 内联 CSS/JS） |
-| `GET /manifest.json` | 启动时扫一遍 `results/` 得到的所有可用 (σ, test_size, dataset, chart) 元组 |
+| `GET /manifest.json` | 启动时扫一遍 `results/` 得到的所有可用 (σ, test_size, dataset, chart, jitter_scale) 元组,以及 `feature_distributions[]` |
 | `GET /results/<rel>` | 透传 `results/` 下的文件（PNG） |
 | `GET /table?jsonl=<rel>` | 按需聚合一份 `metrics.jsonl`，返回每 (split, model, mode, k) 一行的 JSON |
 

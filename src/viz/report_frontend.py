@@ -331,6 +331,38 @@ FRONTEND_HTML = r"""<!doctype html>
        instead of being stuck at one third of the row. */
     grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   }
+
+  /* ---------- feature distribution section ---------- */
+  .feature-dist-section {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 0.6rem; padding: 0.85rem 1rem; margin-bottom: 1rem;
+    box-shadow: var(--shadow);
+  }
+  .feature-dist-section > .head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.6rem; flex-wrap: wrap; gap: 0.4rem;
+  }
+  .feature-dist-section > .head h2 {
+    font-size: 1rem; margin: 0; color: var(--fg-soft);
+  }
+  .feature-dist-section > .head .hint {
+    color: var(--fg-muted); font-size: 0.82rem;
+  }
+  .feature-dist-grid {
+    display: grid; gap: 0.85rem;
+    /* Two cards per row at the standard viewport, dropping to one when the
+       layout-main column is narrow. Each card holds a tall box-plot grid,
+       so we let the image rule its own height (max-width: 100%). */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  @media (max-width: 1100px) {
+    .feature-dist-grid { grid-template-columns: 1fr; }
+  }
+  .feature-dist-grid .image-card { box-shadow: none; }
+  .feature-dist-grid .empty-hint {
+    color: var(--fg-muted); font-size: 0.85rem; padding: 0.5rem 0.25rem;
+    grid-column: 1 / -1;
+  }
   .macro-card {
     background: var(--bg-inset); border: 1px solid var(--border-soft);
     border-radius: 0.5rem; padding: 0.55rem 0.7rem 0.4rem;
@@ -482,6 +514,14 @@ FRONTEND_HTML = r"""<!doctype html>
         <div class="macro-cards" id="macro-cards"></div>
       </section>
 
+      <section class="feature-dist-section" id="feature-dist-section">
+        <div class="head">
+          <h2>特征分布</h2>
+          <span class="hint">每个 dataset 一张 box plot（与 σ / test_size / jitter_scale 无关）。由 <code>scripts/plot_feature_distributions.py</code> 产出。</span>
+        </div>
+        <div class="feature-dist-grid" id="feature-dist-grid"></div>
+      </section>
+
       <section id="gallery" class="gallery"></section>
 
       <section class="tables-section">
@@ -600,6 +640,7 @@ FRONTEND_HTML = r"""<!doctype html>
     STATE.compare = loadCompare();
     renderCompare();
     renderGallery();
+    renderFeatureDistributions();
     renderTables();
     renderMacro();
   }
@@ -678,6 +719,7 @@ FRONTEND_HTML = r"""<!doctype html>
     saveFilters();
     updateSummary();
     renderGallery();
+    renderFeatureDistributions();
     renderTables();
     renderMacro();
   }
@@ -709,6 +751,7 @@ FRONTEND_HTML = r"""<!doctype html>
     saveFilters();
     updateSummary();
     renderGallery();
+    renderFeatureDistributions();
     renderTables();
     renderMacro();
   }
@@ -738,6 +781,50 @@ FRONTEND_HTML = r"""<!doctype html>
     return f.sigma.has(it.sigma) && f.test_size.has(it.test_size)
         && f.dataset.has(it.dataset)
         && f.jitter_scale.has(itemScale(it));
+  }
+
+  // ---------- Feature distributions (dataset-level box plots) ----------
+  function renderFeatureDistributions() {
+    const grid = document.getElementById("feature-dist-grid");
+    if (!grid) return;
+    const m = STATE.manifest;
+    const all = Array.isArray(m.feature_distributions)
+      ? m.feature_distributions : [];
+    // Gated by the dataset filter only — feature distributions don't
+    // depend on σ / test_size / jitter_scale.
+    const items = all.filter(it => STATE.filters.dataset.has(it.dataset))
+                     .slice()
+                     .sort((a, b) => a.dataset.localeCompare(b.dataset));
+    if (!items.length) {
+      grid.innerHTML = all.length
+        ? '<div class="empty-hint">No dataset selected. Pick at least one in the dataset filter.</div>'
+        : '<div class="empty-hint">No <code>results/feature_distributions/&lt;dataset&gt;.png</code> on disk yet. Run <code>scripts/plot_feature_distributions.py --local-all</code>.</div>';
+      return;
+    }
+    const compareSet = new Set(STATE.compare.map(c => c.key));
+    grid.innerHTML = items.map(it => {
+      const key = it.url;
+      const inCompare = compareSet.has(key);
+      return `
+        <div class="image-card">
+          <div class="caption">
+            <div class="meta">
+              <strong>${escapeHtml(it.dataset)}</strong>
+              <div>feature distribution</div>
+            </div>
+            <button class="compare-btn ${inCompare ? "added" : ""}"
+                    data-key="${escapeAttr(key)}"
+                    data-url="${escapeAttr(it.url)}"
+                    data-label="${escapeAttr(it.label)}">
+              ${inCompare ? "✓ Added" : "+ Compare"}
+            </button>
+          </div>
+          <img loading="lazy" src="${escapeAttr(it.url)}" alt="${escapeAttr(it.label)}">
+        </div>`;
+    }).join("");
+    grid.querySelectorAll(".compare-btn").forEach(b => {
+      b.addEventListener("click", onCompareClick);
+    });
   }
 
   // ---------- Gallery ----------
