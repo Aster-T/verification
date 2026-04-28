@@ -892,8 +892,8 @@ FRONTEND_HTML = r"""<!doctype html>
 
     const fmt = s => {
       if (!s || s.n === 0) return "—";
-      if (s.n === 1) return s.mean.toFixed(4);
-      return `${s.mean.toFixed(4)} ± ${s.std.toFixed(4)}`;
+      if (s.n === 1) return s.mean.toFixed(3);
+      return `${s.mean.toFixed(3)} ± ${s.std.toFixed(3)}`;
     };
     const fmtInt = v => (v === null || v === undefined) ? "—" : String(v);
     const rows = data.rows.map(r => {
@@ -1008,9 +1008,9 @@ FRONTEND_HTML = r"""<!doctype html>
     const a = Math.abs(x);
     // Scientific for very large / very small magnitudes — keeps cells short.
     if (a !== 0 && (a >= 1e4 || a < 1e-3)) {
-      return x.toExponential(2).replace("e+", "e").replace("e-0", "e-");
+      return x.toExponential(3).replace("e+", "e").replace("e-0", "e-");
     }
-    return x.toFixed(4);
+    return x.toFixed(3);
   }
   function macroFmt(s) {
     if (!s || s.n === 0) return "—";
