@@ -65,16 +65,16 @@ _PANEL_ORDER = [
     ("tabpfn", "exact"),
     ("tabpfn", "jitter"),
 ]
-# Combined-plot label layout: each series annotates one residue class of
-# x-indices (mod 4) so labels stagger horizontally instead of stacking.
-# `dy` puts each series in its own vertical lane; `endpoints` forces the
-# first and last x to always be labeled regardless of the residue class,
-# so endpoints are never silently dropped.
+# Combined-plot label layout: every point gets a label. Each series has a
+# near/far dy pair so consecutive labels along the SAME line zigzag in y
+# and don't overlap horizontally; the four series also occupy distinct
+# vertical bands so labels from different lines don't fight when two lines
+# pass close in y.
 _COMBINED_LABEL = {
-    ("mlr", "exact"):    {"mod": 0, "dy": +30, "endpoints": True},
-    ("mlr", "jitter"):   {"mod": 1, "dy": -22, "endpoints": True},
-    ("tabpfn", "exact"): {"mod": 2, "dy": +18, "endpoints": True},
-    ("tabpfn", "jitter"):{"mod": 3, "dy": -36, "endpoints": True},
+    ("mlr", "exact"):    {"dy_near": +28, "dy_far": +44},
+    ("mlr", "jitter"):   {"dy_near": -16, "dy_far": -32},
+    ("tabpfn", "exact"): {"dy_near": +14, "dy_far": +30},
+    ("tabpfn", "jitter"):{"dy_near": -36, "dy_far": -52},
 }
 # Per-model plot (one model, both modes) — every point gets a label.
 # Each line has a near/far dy so consecutive labels along the SAME line
@@ -242,17 +242,14 @@ def _plot_combined(ax, series, skips, *,
         ax.fill_between(xs, means - stds, means + stds,
                         color=color, alpha=0.12)
         cfg = _COMBINED_LABEL.get((model, mode),
-                                  {"mod": 0, "dy": 14, "endpoints": True})
-        n = len(xs)
+                                  {"dy_near": +18, "dy_far": +34})
         for i, (x, ym) in enumerate(zip(xs, means)):
             if not np.isfinite(ym):
                 continue
-            is_endpoint = cfg["endpoints"] and (i == 0 or i == n - 1)
-            if (i % 4) != cfg["mod"] and not is_endpoint:
-                continue
+            dy = cfg["dy_near"] if (i % 2 == 0) else cfg["dy_far"]
             ax.annotate(
                 f"({int(x)}, {ym:.3f})",
-                xy=(x, ym), xytext=(0, cfg["dy"]),
+                xy=(x, ym), xytext=(0, dy),
                 textcoords="offset points",
                 ha="center", va="center", fontsize=7, color=color,
                 arrowprops=dict(arrowstyle="-", color=color,

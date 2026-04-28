@@ -124,6 +124,17 @@ def main() -> None:
              "columns and uses its internal categorical handler. MLR is "
              "unaffected (it always factorizes internally).",
     )
+    p.add_argument(
+        "--parallel-k",
+        type=int,
+        default=None,
+        help="Number of TabPFN fit/predict slots to run concurrently on "
+             "the GPU. Default: CONFIG['row_probe']['parallel_k'] "
+             f"(currently {int(rp.get('parallel_k', 1))}). 1 disables "
+             "threading and recovers the legacy serial path. Drop this "
+             "if you start hitting CUDA OOM (each slot holds one X_ctx "
+             "+ ensemble activations on-device).",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -184,6 +195,7 @@ def main() -> None:
             jitter_sigma=args.jitter_sigma,
             jitter_scale=args.jitter_scale,
             tabpfn_numeric=args.tabpfn_numeric,
+            parallel_k=args.parallel_k,
         )
 
 

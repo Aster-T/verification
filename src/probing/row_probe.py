@@ -62,6 +62,7 @@ from __future__ import annotations
 import csv
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -472,6 +473,7 @@ def _run_proportional(
     jitter_sigma: float | None = None,
     jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
+    parallel_k: int = 1,
 ) -> None:
     effective_test_size = (
         test_size if test_size is not None
@@ -513,111 +515,132 @@ def _run_proportional(
             y_full_std,
         )
 
-        for k in k_list:
-            n_ctx = k * n_tr_original
-            for mode in modes:
-                # Skip duplicate_context entirely if every model is already done.
-                todo_models = [
-                    m for m in models
-                    if (m, int(k), mode, int(seed)) not in done_keys
-                ]
-                if not todo_models:
-                    logger.info(
-                        "skip dataset=%s k=%d mode=%s seed=%d: all models already done",
-                        dataset, k, mode, seed,
-                    )
-                    continue
-                rng = np.random.default_rng(np.random.SeedSequence(
-                    entropy=[seed, k, 0 if mode == "exact" else 1],
-                ))
-                X_ctx, y_ctx = duplicate_context(
-                    X_tr, y_tr, k, mode, rng,
-                    jitter_sigma=jitter_sigma,
-                    is_nominal=is_nominal,
-                    jitter_scale=jitter_scale,
+        # Build the (k, mode, model) task list for this seed, skipping any
+        # combos that resume already covered. Each task is an independent
+        # fit+predict — duplicate_context runs *inside* the worker so the
+        # CPU jitter prep can overlap with another worker's GPU compute.
+        # Note: the legacy code shared X_ctx between MLR and TabPFN within
+        # a (k, mode); we lose that micro-optimization, but jitter prep is
+        # cheap relative to fit, so the parallelism win dwarfs it.
+        tasks = [
+            (int(k), mode, model)
+            for k in k_list for mode in modes for model in models
+            if (model, int(k), mode, int(seed)) not in done_keys
+        ]
+        if not tasks:
+            continue
+
+        def _compute(k: int, mode: str, model: str):
+            rng = np.random.default_rng(np.random.SeedSequence(
+                entropy=[seed, k, 0 if mode == "exact" else 1],
+            ))
+            X_ctx, y_ctx = duplicate_context(
+                X_tr, y_tr, k, mode, rng,
+                jitter_sigma=jitter_sigma,
+                is_nominal=is_nominal,
+                jitter_scale=jitter_scale,
+            )
+            if model == "mlr":
+                return _fit_predict_mlr(X_ctx, y_ctx, X_te, is_nominal)
+            return _fit_predict_tabpfn(
+                X_ctx, y_ctx, X_te, seed,
+                accept_text=not tabpfn_numeric,
+            )
+
+        def _process(k: int, mode: str, model: str, exc, result) -> None:
+            base_rec = {
+                "dataset": dataset,
+                "model": model,
+                "split_mode": "proportional",
+                "k": int(k),
+                "mode": mode,
+                "seed": int(seed),
+                "n_ctx": int(k * n_tr_original),
+                "n_query": int(n_query),
+                "n_folds": 1,
+                "n_features": int(n_features),
+                "jitter_scale": jitter_scale,
+            }
+            if exc is not None:
+                write_jsonl(jsonl_path, [{
+                    "skipped": True,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    **base_rec,
+                }], append=True)
+                logger.warning("failed %s k=%d mode=%s seed=%d: %s",
+                               model, k, mode, seed, exc)
+                return
+            y_pred, fit_sec, predict_sec = result
+            y_pred_arr = np.asarray(y_pred, dtype=np.float64).ravel()
+            if not np.all(np.isfinite(y_pred_arr)):
+                n_bad = int(np.sum(~np.isfinite(y_pred_arr)))
+                write_jsonl(jsonl_path, [{
+                    "skipped": True,
+                    "reason": f"non-finite y_pred ({n_bad}/{y_pred_arr.size})",
+                    **base_rec,
+                }], append=True)
+                logger.warning(
+                    "failed %s k=%d mode=%s seed=%d: non-finite y_pred (%d/%d)",
+                    model, k, mode, seed, n_bad, y_pred_arr.size,
                 )
+                return
+            metrics = _metric_row(
+                y_te, y_pred_arr,
+                denom_std=y_full_std,
+                tanker_mask=tanker_mask,
+            )
+            rec = {
+                **base_rec,
+                "y_query_std": metrics["y_query_std"],
+                "y_denom_std": metrics["y_denom_std"],
+                "nrmse": metrics["nrmse"], "r2": metrics["r2"],
+                "rmse": metrics["rmse"], "mae": metrics["mae"],
+                "mape": metrics["mape"], "mape_n": metrics["mape_n"],
+                "fit_sec": float(fit_sec),
+                "predict_sec": float(predict_sec),
+            }
+            if "mape_tanker" in metrics:
+                rec["mape_tanker"] = metrics["mape_tanker"]
+                rec["mape_tanker_n"] = metrics["mape_tanker_n"]
+            write_jsonl(jsonl_path, [rec], append=True)
+            _write_predictions_csv(
+                row_dir / f"{_combo_stem(model, 'proportional', mode, k, seed)}.csv",
+                np.arange(n_query),
+                np.asarray(y_te, dtype=np.float64),
+                y_pred_arr,
+            )
+            logger.info(
+                "%s dataset=%s k=%d mode=%s seed=%d nrmse=%s fit=%.2fs predict=%.2fs",
+                model, dataset, k, mode, seed,
+                f"{metrics['nrmse']:.4f}" if metrics["nrmse"] is not None else "N/A",
+                fit_sec, predict_sec,
+            )
 
-                for model in todo_models:
-                    base_rec = {
-                        "dataset": dataset,
-                        "model": model,
-                        "split_mode": "proportional",
-                        "k": int(k),
-                        "mode": mode,
-                        "seed": int(seed),
-                        "n_ctx": int(n_ctx),
-                        "n_query": int(n_query),
-                        "n_folds": 1,
-                        "n_features": int(n_features),
-                        "jitter_scale": jitter_scale,
-                    }
-
+        if parallel_k <= 1:
+            # Legacy serial path. Identical writes/log lines as before.
+            for k, mode, model in tasks:
+                try:
+                    res = _compute(k, mode, model)
+                    _process(k, mode, model, None, res)
+                except Exception as e:  # noqa: BLE001
+                    _process(k, mode, model, e, None)
+        else:
+            # All writes happen on the main thread (inside _process, called
+            # from the as_completed iterator), so jsonl/CSV stay single-
+            # writer without explicit locking. Workers are pure compute.
+            with ThreadPoolExecutor(max_workers=parallel_k) as pool:
+                futs = {
+                    pool.submit(_compute, k, mode, model): (k, mode, model)
+                    for k, mode, model in tasks
+                }
+                for fut in as_completed(futs):
+                    k, mode, model = futs[fut]
                     try:
-                        if model == "mlr":
-                            y_pred, fit_sec, predict_sec = _fit_predict_mlr(
-                                X_ctx, y_ctx, X_te, is_nominal,
-                            )
-                        else:
-                            y_pred, fit_sec, predict_sec = _fit_predict_tabpfn(
-                                X_ctx, y_ctx, X_te, seed,
-                                accept_text=not tabpfn_numeric,
-                            )
+                        res = fut.result()
                     except Exception as e:  # noqa: BLE001
-                        write_jsonl(jsonl_path, [{
-                            "skipped": True,
-                            "reason": f"{type(e).__name__}: {e}",
-                            **base_rec,
-                        }], append=True)
-                        logger.warning("failed %s k=%d mode=%s seed=%d: %s",
-                                       model, k, mode, seed, e)
+                        _process(k, mode, model, e, None)
                         continue
-
-                    y_pred_arr = np.asarray(y_pred, dtype=np.float64).ravel()
-                    if not np.all(np.isfinite(y_pred_arr)):
-                        n_bad = int(np.sum(~np.isfinite(y_pred_arr)))
-                        write_jsonl(jsonl_path, [{
-                            "skipped": True,
-                            "reason": f"non-finite y_pred ({n_bad}/{y_pred_arr.size})",
-                            **base_rec,
-                        }], append=True)
-                        logger.warning(
-                            "failed %s k=%d mode=%s seed=%d: non-finite y_pred (%d/%d)",
-                            model, k, mode, seed, n_bad, y_pred_arr.size,
-                        )
-                        continue
-
-                    metrics = _metric_row(
-                        y_te, y_pred_arr,
-                        denom_std=y_full_std,
-                        tanker_mask=tanker_mask,
-                    )
-                    rec = {
-                        **base_rec,
-                        "y_query_std": metrics["y_query_std"],
-                        "y_denom_std": metrics["y_denom_std"],
-                        "nrmse": metrics["nrmse"], "r2": metrics["r2"],
-                        "rmse": metrics["rmse"], "mae": metrics["mae"],
-                        "mape": metrics["mape"], "mape_n": metrics["mape_n"],
-                        "fit_sec": float(fit_sec),
-                        "predict_sec": float(predict_sec),
-                    }
-                    if "mape_tanker" in metrics:
-                        rec["mape_tanker"] = metrics["mape_tanker"]
-                        rec["mape_tanker_n"] = metrics["mape_tanker_n"]
-                    write_jsonl(jsonl_path, [rec], append=True)
-
-                    _write_predictions_csv(
-                        row_dir / f"{_combo_stem(model, 'proportional', mode, k, seed)}.csv",
-                        np.arange(n_query),
-                        np.asarray(y_te, dtype=np.float64),
-                        y_pred_arr,
-                    )
-                    logger.info(
-                        "%s dataset=%s k=%d mode=%s seed=%d nrmse=%s fit=%.2fs predict=%.2fs",
-                        model, dataset, k, mode, seed,
-                        f"{metrics['nrmse']:.4f}" if metrics["nrmse"] is not None else "N/A",
-                        fit_sec, predict_sec,
-                    )
+                    _process(k, mode, model, None, res)
 
 
 def _run_loo(
@@ -631,6 +654,7 @@ def _run_loo(
     jitter_sigma: float | None = None,
     jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
+    parallel_k: int = 1,
 ) -> None:
     # Schema-aware resume — see _run_proportional for the rationale.
     done_keys = _resume_keys(jsonl_path, dataset)
@@ -687,7 +711,11 @@ def _run_loo(
                     predict_sec_total = 0.0
                     failed: Exception | None = None
                     nonfinite_fold: int | None = None
-                    for i in range(n):
+
+                    def _fold(i: int):
+                        """Pure-compute LOO fold. Returns (y_pred_scalar,
+                        fit_sec, predict_sec). Raises on fit/predict error;
+                        caller handles non-finite checks."""
                         mask = all_idx != i
                         rng = np.random.default_rng(np.random.SeedSequence(
                             entropy=[seed, k, 0 if mode == "exact" else 1, i],
@@ -698,27 +726,66 @@ def _run_loo(
                             is_nominal=is_nominal,
                             jitter_scale=jitter_scale,
                         )
-                        try:
-                            if model == "mlr":
-                                y_pred, fs, ps = _fit_predict_mlr(
-                                    X_ctx, y_ctx, X[i : i + 1], is_nominal,
-                                )
-                            else:
-                                y_pred, fs, ps = _fit_predict_tabpfn(
-                                    X_ctx, y_ctx, X[i : i + 1], seed,
-                                    accept_text=not tabpfn_numeric,
-                                )
-                        except Exception as e:  # noqa: BLE001
-                            failed = e
-                            break
+                        if model == "mlr":
+                            y_pred, fs, ps = _fit_predict_mlr(
+                                X_ctx, y_ctx, X[i : i + 1], is_nominal,
+                            )
+                        else:
+                            y_pred, fs, ps = _fit_predict_tabpfn(
+                                X_ctx, y_ctx, X[i : i + 1], seed,
+                                accept_text=not tabpfn_numeric,
+                            )
+                        return y_pred, fs, ps
+
+                    def _consume(i: int, y_pred, fs: float, ps: float) -> bool:
+                        """Stash one fold's result. Returns False when the
+                        prediction is non-finite (caller must record the
+                        offending fold and stop). Updates closure-captured
+                        nonfinite_fold and the y_*_all / *_sec_total
+                        accumulators in place."""
+                        nonlocal nonfinite_fold, fit_sec_total, predict_sec_total
                         yp = float(np.asarray(y_pred, dtype=np.float64).ravel()[0])
                         if not np.isfinite(yp):
                             nonfinite_fold = i
-                            break
+                            return False
                         y_true_all[i] = float(y[i])
                         y_pred_all[i] = yp
                         fit_sec_total += fs
                         predict_sec_total += ps
+                        return True
+
+                    # MLR is CPU-only; threading just adds GIL contention
+                    # over BLAS calls. Only parallelize TabPFN.
+                    use_parallel = parallel_k > 1 and model == "tabpfn"
+                    if not use_parallel:
+                        for i in range(n):
+                            try:
+                                y_pred, fs, ps = _fold(i)
+                            except Exception as e:  # noqa: BLE001
+                                failed = e
+                                break
+                            if not _consume(i, y_pred, fs, ps):
+                                break
+                    else:
+                        with ThreadPoolExecutor(max_workers=parallel_k) as pool:
+                            futs = {pool.submit(_fold, i): i for i in range(n)}
+                            try:
+                                for fut in as_completed(futs):
+                                    i = futs[fut]
+                                    try:
+                                        y_pred, fs, ps = fut.result()
+                                    except Exception as e:  # noqa: BLE001
+                                        failed = e
+                                        break
+                                    if not _consume(i, y_pred, fs, ps):
+                                        break
+                            finally:
+                                # Cancel pending tasks on early exit so the
+                                # pool tears down quickly; running futures
+                                # finish naturally (cancel is a no-op on
+                                # already-started work).
+                                for f in futs:
+                                    f.cancel()
 
                     if failed is not None:
                         write_jsonl(jsonl_path, [{
@@ -789,6 +856,7 @@ def run_row_probe(
     jitter_sigma: float | None = None,
     jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
+    parallel_k: int | None = None,
 ) -> None:
     """
     Run all (model, k, mode, seed) combos. Writes `metrics.jsonl` + one
@@ -806,6 +874,13 @@ def run_row_probe(
         std. The two are intended as ablation siblings — caller is expected
         to partition the output path on this value (see scripts/run_row_probe
         .py) so records from the two variants don't collide.
+      parallel_k: number of TabPFN fit/predict slots to run concurrently
+        on the GPU. None → CONFIG["row_probe"]["parallel_k"] (default 5,
+        sized for a 48 GB card). 1 disables threading and recovers the
+        legacy serial path. In proportional mode the pool spans (k, mode,
+        model) tasks per seed; in LOO mode it spans the N folds within
+        each (model='tabpfn', k, mode, seed). MLR folds always run serial
+        — they're CPU-bound and threading just hits BLAS contention.
 
     RESUME / FRESH semantics:
       The runners skip any (model, k, mode, seed) combo whose record already
@@ -832,6 +907,14 @@ def run_row_probe(
             f"jitter_scale must be 'absolute' or 'per_col_std', "
             f"got {jitter_scale!r}"
         )
+    effective_parallel_k = (
+        int(parallel_k) if parallel_k is not None
+        else int(CONFIG["row_probe"].get("parallel_k", 1))
+    )
+    if effective_parallel_k < 1:
+        raise ValueError(
+            f"parallel_k must be >= 1, got {effective_parallel_k!r}"
+        )
     row_dir = ensure_dir(row_dir)
     jsonl_path = row_dir / "metrics.jsonl"
 
@@ -857,9 +940,10 @@ def run_row_probe(
     logger.info(
         "row_probe start dataset=%s split_mode=%s models=%s "
         "k_list=%s modes=%s seeds=%s test_size=%s jitter_sigma=%s "
-        "jitter_scale=%s tabpfn_numeric=%s out=%s",
+        "jitter_scale=%s tabpfn_numeric=%s parallel_k=%d out=%s",
         dataset, split_mode, models, k_list, modes, seeds,
-        test_size_str, sigma_str, scale_str, tabpfn_numeric, row_dir,
+        test_size_str, sigma_str, scale_str, tabpfn_numeric,
+        effective_parallel_k, row_dir,
     )
 
     if split_mode == "proportional":
@@ -868,6 +952,7 @@ def run_row_probe(
             test_size=test_size, jitter_sigma=jitter_sigma,
             jitter_scale=jitter_scale,
             tabpfn_numeric=tabpfn_numeric,
+            parallel_k=effective_parallel_k,
         )
     else:
         if test_size is not None:
@@ -879,4 +964,5 @@ def run_row_probe(
             jitter_sigma=jitter_sigma,
             jitter_scale=jitter_scale,
             tabpfn_numeric=tabpfn_numeric,
+            parallel_k=effective_parallel_k,
         )

@@ -132,6 +132,17 @@ CONFIG = {
         "k_list": [i for i in range(1, 11)],
         "modes": ["exact", "jitter"],
         "seeds": [42],
+        # GPU-side concurrency for the row probe. Each "slot" runs an
+        # independent TabPFN fit/predict on the same CUDA device — the GPU's
+        # SM scheduler interleaves their kernels and the host-side CPU prep
+        # (duplicate_context, jitter RNG) overlaps with GPU work. Set to 1
+        # to disable threading entirely and recover the legacy serial path.
+        # OOM risk grows roughly linearly: each slot holds one X_ctx +
+        # ensemble activations on-device. With k_max≈15, n_ctx≈3k rows,
+        # default ensemble, a single slot is ~200–300 MB; on a 48 GB card
+        # parallel_k=5 leaves ample headroom. Drop this if you start
+        # seeing CUDA OOM, or if you switch to a much smaller GPU.
+        "parallel_k": 5,
         "jitter_sigma": 1e-6,
         # Jitter noise scaling strategy for `mode == "jitter"`:
         #   "absolute"    -> noise = N(0, σ²) independent of column scale
