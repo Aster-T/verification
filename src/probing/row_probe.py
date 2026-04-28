@@ -71,7 +71,7 @@ from sklearn.model_selection import train_test_split
 from src.configs import CONFIG, get_dataset_cfg, get_device
 from src.data.loaders import load_dataset_full
 from src.models.mlr_wrapper import MLRWithW
-from src.utils.io import ensure_dir, existing_keys_jsonl, write_jsonl
+from src.utils.io import ensure_dir, iter_jsonl, write_jsonl
 from src.utils.seed import set_seed
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,74 @@ _TANKER_IDS = frozenset({
     "G1099", "G1107", "G1113", "G1132", "G1171",
     "G1186", "G1194", "G1198", "GTEST",
 })
+
+# Fields the current writer emits on every NON-skipped record. Used by the
+# schema-aware resume path: records missing any of these are considered
+# stale, dropped from the jsonl, and re-fit on the next run. Bumping this
+# tuple is what tells old runs "your row needs to be redone".
+_REQUIRED_FIELDS_BASE = (
+    "dataset", "model", "split_mode", "k", "mode", "seed",
+    "n_ctx", "n_query", "n_folds", "n_features",
+    "y_query_std", "y_denom_std",
+    "nrmse", "r2", "rmse", "mae",
+    "mape", "mape_n",
+    "fit_sec", "predict_sec",
+)
+# Extra fields required for ship-all / ship-selected (per-tanker MAPE).
+_REQUIRED_FIELDS_TANKER = ("mape_tanker", "mape_tanker_n")
+
+
+def _record_is_current(rec: dict, dataset: str) -> bool:
+    """Schema check used by the resume path. A skipped record is always
+    'current' — its semantic value (we tried this combo and it raised)
+    doesn't get invalidated by adding new metric fields elsewhere."""
+    if rec.get("skipped"):
+        return True
+    for f in _REQUIRED_FIELDS_BASE:
+        if f not in rec:
+            return False
+    if dataset in _TANKER_DATASETS:
+        for f in _REQUIRED_FIELDS_TANKER:
+            if f not in rec:
+                return False
+    return True
+
+
+def _resume_keys(jsonl_path: Path, dataset: str) -> set[tuple]:
+    """Schema-aware resume: scan an existing metrics.jsonl, drop records
+    that are missing fields the current writer would emit (so they get
+    re-fit on this run), and return the (model, k, mode, seed) tuples
+    that should be skipped because their record IS up-to-date.
+
+    Side effect: if any stale records were found, the file is rewritten
+    in place without them. Skipped records are always preserved (the
+    'we tried, it failed' note is still useful)."""
+    if not jsonl_path.exists():
+        return set()
+    keep: list[dict] = []
+    done: set[tuple] = set()
+    n_total = 0
+    n_dropped = 0
+    for rec in iter_jsonl(jsonl_path):
+        n_total += 1
+        if _record_is_current(rec, dataset):
+            keep.append(rec)
+            try:
+                done.add((rec["model"], rec["k"], rec["mode"], rec["seed"]))
+            except KeyError:
+                # Record without the combo key isn't usable for resume; drop.
+                n_dropped += 1
+                keep.pop()
+        else:
+            n_dropped += 1
+    if n_dropped > 0:
+        logger.info(
+            "schema-aware resume: dropping %d/%d stale record(s) from %s "
+            "(missing fields the current writer emits); rewriting file",
+            n_dropped, n_total, jsonl_path.name,
+        )
+        write_jsonl(jsonl_path, keep, append=False)
+    return done
 
 
 def _tanker_mask(
@@ -332,13 +400,12 @@ def _run_proportional(
         test_size if test_size is not None
         else float(get_dataset_cfg(dataset).get("test_size", 0.2))
     )
-    # Resume: skip (model, k, mode, seed) combos already present in jsonl.
-    # Caller controls "fresh start" by clearing the file before invocation
-    # (run_row_probe.py: --fresh wipes row_dir; without it we resume).
-    done_keys = existing_keys_jsonl(
-        jsonl_path,
-        lambda r: (r["model"], r["k"], r["mode"], r["seed"]),
-    )
+    # Schema-aware resume: combos with a current-schema record are skipped;
+    # combos whose existing record is missing fields the current writer
+    # emits (e.g. an old jsonl predating MAPE) get dropped from the file
+    # and re-fit on this run. Caller controls "wipe everything" via
+    # run_row_probe.py --fresh, which clears row_dir before we get here.
+    done_keys = _resume_keys(jsonl_path, dataset)
     if done_keys:
         logger.info(
             "resume dataset=%s split_mode=proportional: %d combos already in %s, will skip them",
@@ -485,11 +552,8 @@ def _run_loo(
     jitter_sigma: float | None = None,
     tabpfn_numeric: bool = False,
 ) -> None:
-    # Resume: skip (model, k, mode, seed) already done.
-    done_keys = existing_keys_jsonl(
-        jsonl_path,
-        lambda r: (r["model"], r["k"], r["mode"], r["seed"]),
-    )
+    # Schema-aware resume — see _run_proportional for the rationale.
+    done_keys = _resume_keys(jsonl_path, dataset)
     if done_keys:
         logger.info(
             "resume dataset=%s split_mode=loo: %d combos already in %s, will skip them",
