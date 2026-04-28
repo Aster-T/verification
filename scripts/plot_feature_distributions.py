@@ -76,7 +76,71 @@ def _column_to_float(col: np.ndarray) -> np.ndarray:
     return arr[np.isfinite(arr)]
 
 
+# Font family names we know cover CJK. Order = preference: prefer
+# platform-native fonts, then OSS fallbacks, then last-resort Windows
+# fonts (in case someone cached one on a non-Windows machine).
+_CJK_CANDIDATES = (
+    # macOS
+    "PingFang SC", "PingFang TC", "Heiti SC",
+    # Windows
+    "Microsoft YaHei", "Microsoft JhengHei", "SimHei", "SimSun",
+    # Cross-platform OSS (Linux usually means installing one of these)
+    "Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Sans CJK JP",
+    "Noto Sans SC", "Noto Sans TC",
+    "WenQuanYi Zen Hei", "WenQuanYi Micro Hei",
+    "Source Han Sans SC", "Source Han Sans CN",
+    "Arial Unicode MS",
+)
+
+# User-writable font directories. The script auto-registers any .ttf /
+# .otf / .ttc files it finds in these so users without sudo can drop a
+# CJK font into one and have it picked up next run.
+_USER_FONT_DIRS = (
+    Path.home() / ".fonts",
+    Path.home() / ".local" / "share" / "fonts",
+    REPO / "third-party" / "fonts",   # repo-local opt-in
+)
+
+
+def _ensure_cjk_fonts_loaded() -> list[str]:
+    """Register any user-space TTF/OTF/TTC the system font cache may have
+    missed, then return the subset of `_CJK_CANDIDATES` that's actually
+    available. Returns an empty list when no CJK font is reachable on
+    this machine — caller logs a remediation hint in that case."""
+    from matplotlib import font_manager  # noqa: PLC0415
+
+    for d in _USER_FONT_DIRS:
+        if not d.is_dir():
+            continue
+        for ext in ("*.ttf", "*.otf", "*.ttc"):
+            for fp in d.rglob(ext):
+                try:
+                    font_manager.fontManager.addfont(str(fp))
+                except Exception:  # noqa: BLE001
+                    # Bad font file shouldn't kill the script.
+                    pass
+
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    return [c for c in _CJK_CANDIDATES if c in available]
+
+
 def _set_rc() -> None:
+    cjk = _ensure_cjk_fonts_loaded()
+    if not cjk:
+        logger.warning(
+            "No CJK-capable font found on this system; Chinese feature\n"
+            "names (e.g. 船号) will render as missing-glyph boxes.\n"
+            "Fixes (any one is enough):\n"
+            "  • Ubuntu/Debian (root):  sudo apt install fonts-noto-cjk\n"
+            "                            (or smaller: fonts-wqy-zenhei)\n"
+            "  • RHEL/CentOS:           sudo yum install google-noto-sans-cjk-fonts\n"
+            "  • macOS:                 PingFang SC is preinstalled (should be fine)\n"
+            "  • Windows:               Microsoft YaHei is preinstalled (should be fine)\n"
+            "  • No-root option:        drop a .ttf/.otf into one of:\n"
+            "                            ~/.fonts/   ~/.local/share/fonts/   %s/\n"
+            "                            then re-run (and `rm -rf ~/.cache/matplotlib` if needed).",
+            (REPO / "third-party" / "fonts").as_posix(),
+        )
     plt.rcParams.update({
         "font.size": 9,
         "axes.titlesize": 10,
@@ -86,16 +150,12 @@ def _set_rc() -> None:
         "grid.color": "#cccccc",
         "grid.linestyle": ":",
         "grid.linewidth": 0.5,
-        # CJK-capable fallbacks first so Chinese feature names (e.g. 船号)
-        # don't render as missing-glyph boxes. matplotlib walks this list
-        # and uses the first font that has the glyph; DejaVu Sans (the
-        # default) stays at the end for ASCII coverage.
-        "font.sans-serif": [
-            "Microsoft YaHei", "PingFang SC",
-            "Noto Sans CJK SC", "WenQuanYi Zen Hei",
-            "SimHei", "Arial Unicode MS",
-            "DejaVu Sans",
-        ],
+        # Found CJK fonts go to the front of the priority list. matplotlib
+        # walks this list per-glyph and uses the first font that has the
+        # codepoint; DejaVu Sans / Liberation Sans stay at the end for
+        # ASCII coverage on machines where the only CJK font is, well,
+        # CJK-only.
+        "font.sans-serif": list(cjk) + ["DejaVu Sans", "Liberation Sans"],
         # Prevent the unicode minus glyph from rendering as a box on fonts
         # that lack U+2212.
         "axes.unicode_minus": False,

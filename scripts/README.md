@@ -158,9 +158,21 @@ python scripts/plot_feature_distributions.py --local-all --openml-all
 这些 PNG 渲染在 "特征分布" 区(夹在 "宏指标" 和 gallery 之间),由
 **dataset 筛选**驱动,与 σ/test_size/scale 解耦。
 
-字体:已配置 CJK 回退(`Microsoft YaHei` / `PingFang SC` / `Noto Sans CJK SC`
-/ `WenQuanYi Zen Hei` / `SimHei`),含中文列名(如 `船号`)的数据集不会
-出现 missing-glyph 方块。
+字体:启动时扫一遍系统已注册的 CJK 字体(`PingFang SC` / `Microsoft YaHei`
+/ `Noto Sans CJK SC` / `WenQuanYi Zen Hei` / `SimHei` / `Source Han Sans` /
+`Arial Unicode MS`),把找到的塞到 `font.sans-serif` 优先级表前面,所以中文
+列名(如 `船号`)在 macOS / Windows 默认能正常渲染。
+
+**Linux 服务器**通常默认不带 CJK 字体——会出现 `missing glyph` 警告 + 方块。
+任选一种修法:
+
+| 路径 | 方法 |
+|---|---|
+| 有 root | `sudo apt install fonts-noto-cjk`(或更小的 `fonts-wqy-zenhei`)/ `sudo yum install google-noto-sans-cjk-fonts` |
+| 无 root,系统范围 | 把 `.ttf` / `.otf` 丢进 `~/.fonts/` 或 `~/.local/share/fonts/`,再 `rm -rf ~/.cache/matplotlib` |
+| 无 root,仅本项目 | 把字体文件丢进 `third-party/fonts/`(脚本会自动 `font_manager.addfont`,无需别的步骤) |
+
+字体修好之后无需重跑 probe,只要重跑这个 plot_feature_distributions.py 即可。
 
 ---
 
