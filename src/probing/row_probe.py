@@ -489,7 +489,25 @@ def _prep_tabpfn_X(X, *, accept_text: bool):
     return df
 
 
-def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed, *, accept_text: bool = True):
+def _resolve_tabpfn_v2_model_path() -> str:
+    """Cache-resolved path of the v2 regressor checkpoint
+    (`tabpfn-v2-regressor.ckpt`), matching how
+    `TabPFNRegressor.create_default_for_version(V2)` resolves it. Lazy
+    import keeps `row_probe.py` import-light."""
+    from tabpfn.model_loading import (  # noqa: PLC0415
+        ModelSource,
+        prepend_cache_path,
+    )
+
+    return prepend_cache_path(ModelSource.get_regressor_v2().default_filename)
+
+
+def _fit_predict_tabpfn(
+    X_ctx, y_ctx, X_te, seed,
+    *,
+    accept_text: bool = True,
+    tabpfn_weights: str = "v2_6",
+):
     """Row-probe path: use TabPFNRegressor straight from the box with its
     default inference config (default n_estimators ensemble, default
     PREPROCESS_TRANSFORMS / FEATURE_SHIFT / POLYNOMIAL_FEATURES / etc).
@@ -503,6 +521,11 @@ def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed, *, accept_text: bool = True):
         predictions. Forcing n_estimators=1 + zero-augmentation actively
         hurts predictive accuracy with no upside, so this path uses
         TabPFN's stock ensemble instead.
+
+    `tabpfn_weights`: "v2_6" (default) leaves model_path implicit ("auto" →
+    latest bundled checkpoint); "v2" pins the original v2 weights via
+    cache path resolution. The two coexist in disjoint subtrees thanks to
+    the `weights_<tag>/` path partition wired in run_row_probe.py.
     """
     from tabpfn import TabPFNRegressor  # noqa: PLC0415
 
@@ -510,17 +533,25 @@ def _fit_predict_tabpfn(X_ctx, y_ctx, X_te, seed, *, accept_text: bool = True):
     X_te_in = _prep_tabpfn_X(X_te, accept_text=accept_text)
     y_ctx_in = np.asarray(y_ctx, dtype=np.float64).ravel()
 
+    kwargs: dict = dict(
+        device=get_device(),
+        random_state=int(seed),
+        ignore_pretraining_limits=True,
+    )
+    if tabpfn_weights == "v2":
+        kwargs["model_path"] = _resolve_tabpfn_v2_model_path()
+    elif tabpfn_weights != "v2_6":
+        raise ValueError(
+            f"tabpfn_weights must be 'v2_6' or 'v2', got {tabpfn_weights!r}"
+        )
+
     # Pin every CUDA op in this call to the current thread's dedicated
     # stream. Without this, kernels from concurrent workers serialize on
     # the GPU's default stream and parallel_k>1 buys nothing — see the
     # _get_thread_cuda_stream comment for the longer explanation.
     with _cuda_stream_ctx():
         t0 = time.perf_counter()
-        m = TabPFNRegressor(
-            device=get_device(),
-            random_state=int(seed),
-            ignore_pretraining_limits=True,
-        )
+        m = TabPFNRegressor(**kwargs)
         m.fit(X_ctx_in, y_ctx_in)
         fit_sec = time.perf_counter() - t0
         t0 = time.perf_counter()
@@ -559,6 +590,7 @@ def _run_proportional(
     jitter_sigma: float | None = None,
     jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
+    tabpfn_weights: str = "v2_6",
     parallel_k: int = 1,
 ) -> None:
     effective_test_size = (
@@ -631,6 +663,7 @@ def _run_proportional(
             return _fit_predict_tabpfn(
                 X_ctx, y_ctx, X_te, seed,
                 accept_text=not tabpfn_numeric,
+                tabpfn_weights=tabpfn_weights,
             )
 
         def _process(k: int, mode: str, model: str, exc, result) -> None:
@@ -646,6 +679,7 @@ def _run_proportional(
                 "n_folds": 1,
                 "n_features": int(n_features),
                 "jitter_scale": jitter_scale,
+                "tabpfn_weights": tabpfn_weights,
             }
             if exc is not None:
                 write_jsonl(jsonl_path, [{
@@ -743,6 +777,7 @@ def _run_loo(
     jitter_sigma: float | None = None,
     jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
+    tabpfn_weights: str = "v2_6",
     parallel_k: int = 1,
 ) -> None:
     # Schema-aware resume — see _run_proportional for the rationale.
@@ -801,6 +836,7 @@ def _run_loo(
                         "n_query": 1, "n_folds": int(n),
                         "n_features": int(n_features),
                         "jitter_scale": jitter_scale,
+                        "tabpfn_weights": tabpfn_weights,
                     }
 
                     y_true_all = np.empty(n, dtype=np.float64)
@@ -832,6 +868,7 @@ def _run_loo(
                             y_pred, fs, ps = _fit_predict_tabpfn(
                                 X_ctx, y_ctx, X[i : i + 1], seed,
                                 accept_text=not tabpfn_numeric,
+                                tabpfn_weights=tabpfn_weights,
                             )
                         return y_pred, fs, ps
 
@@ -934,6 +971,7 @@ def run_row_probe(
     jitter_sigma: float | None = None,
     jitter_scale: str = "absolute",
     tabpfn_numeric: bool = False,
+    tabpfn_weights: str = "v2_6",
     parallel_k: int | None = None,
 ) -> None:
     """
@@ -985,6 +1023,10 @@ def run_row_probe(
             f"jitter_scale must be 'absolute' or 'per_col_std', "
             f"got {jitter_scale!r}"
         )
+    if tabpfn_weights not in ("v2_6", "v2"):
+        raise ValueError(
+            f"tabpfn_weights must be 'v2_6' or 'v2', got {tabpfn_weights!r}"
+        )
     effective_parallel_k = (
         int(parallel_k) if parallel_k is not None
         else int(CONFIG["row_probe"].get("parallel_k", 1))
@@ -1018,9 +1060,10 @@ def run_row_probe(
     logger.info(
         "row_probe start dataset=%s split_mode=%s models=%s "
         "k_list=%s modes=%s seeds=%s test_size=%s jitter_sigma=%s "
-        "jitter_scale=%s tabpfn_numeric=%s parallel_k=%d out=%s",
+        "jitter_scale=%s tabpfn_weights=%s tabpfn_numeric=%s "
+        "parallel_k=%d out=%s",
         dataset, split_mode, models, k_list, modes, seeds,
-        test_size_str, sigma_str, scale_str, tabpfn_numeric,
+        test_size_str, sigma_str, scale_str, tabpfn_weights, tabpfn_numeric,
         effective_parallel_k, row_dir,
     )
 
@@ -1030,6 +1073,7 @@ def run_row_probe(
             test_size=test_size, jitter_sigma=jitter_sigma,
             jitter_scale=jitter_scale,
             tabpfn_numeric=tabpfn_numeric,
+            tabpfn_weights=tabpfn_weights,
             parallel_k=effective_parallel_k,
         )
     else:
@@ -1042,5 +1086,6 @@ def run_row_probe(
             jitter_sigma=jitter_sigma,
             jitter_scale=jitter_scale,
             tabpfn_numeric=tabpfn_numeric,
+            tabpfn_weights=tabpfn_weights,
             parallel_k=effective_parallel_k,
         )

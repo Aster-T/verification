@@ -29,7 +29,13 @@ from src.utils.seed import set_seed
 logger = logging.getLogger(__name__)
 
 
-def run_column_probe(dataset: str, column_dir: Path, seed: int) -> None:
+def run_column_probe(
+    dataset: str,
+    column_dir: Path,
+    seed: int,
+    *,
+    tabpfn_weights: str = "v2_6",
+) -> None:
     """
     Run MLR + TabPFN column probing for one dataset and persist numerical
     artefacts. See module docstring for the output layout.
@@ -39,7 +45,16 @@ def run_column_probe(dataset: str, column_dir: Path, seed: int) -> None:
       column_dir: target directory (e.g. `results/<dataset>/column/`). Will be
                   created if missing. Files are written directly into it.
       seed:       forwarded to data loader, seed utility, and model seeds.
+      tabpfn_weights: "v2_6" (default) → TabPFNRegressor's built-in "auto"
+                  (latest bundled checkpoint). "v2" → pin the original v2
+                  weights via TabPFNWithColAttn(use_v2_weights=True). The
+                  CLI partitions the output path so v2 vs v2_6 ablations
+                  don't overwrite each other.
     """
+    if tabpfn_weights not in ("v2_6", "v2"):
+        raise ValueError(
+            f"tabpfn_weights must be 'v2_6' or 'v2', got {tabpfn_weights!r}"
+        )
     import sklearn  # noqa: PLC0415
 
     target_dir = ensure_dir(column_dir)
@@ -74,7 +89,11 @@ def run_column_probe(dataset: str, column_dir: Path, seed: int) -> None:
 
         tabpfn_version = getattr(tabpfn, "__version__", "unknown")
         y_tr_f64 = np.asarray(y_tr, dtype=np.float64)
-        tp = TabPFNWithColAttn(device=get_device(), seed=seed).fit(X_tr, y_tr_f64)
+        tp = TabPFNWithColAttn(
+            device=get_device(),
+            seed=seed,
+            use_v2_weights=(tabpfn_weights == "v2"),
+        ).fit(X_tr, y_tr_f64)
         _ = tp.predict(X_te)
         col_attn = tp.get_col_attn(reduce="mean")
         col_attn_per_layer = tp.get_col_attn(reduce="per_layer")
@@ -101,6 +120,7 @@ def run_column_probe(dataset: str, column_dir: Path, seed: int) -> None:
         "sklearn_version": sklearn.__version__,
         "tabpfn_version": tabpfn_version,
         "tabpfn_status": tabpfn_status,
+        "tabpfn_weights": tabpfn_weights,
         "config_snapshot": {
             "attn_reduce": CONFIG["column_probe"]["attn_reduce"],
         },

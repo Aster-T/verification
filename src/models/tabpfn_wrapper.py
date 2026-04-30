@@ -45,6 +45,13 @@ CONFIGURATION KNOBS FOR ALIGNMENT:
     }
   See shuffle_features_step.py: when shuffle_method is None the permutation
   is np.arange(F), i.e. identity.
+
+  WEIGHTS SELECTION:
+    use_v2_weights=False (default)  -> model_path="auto"   (v2.6 latest)
+    use_v2_weights=True             -> model_path = prepend_cache_path(
+                                       "tabpfn-v2-regressor.ckpt")  # v2 original
+  Both architectures expose the feature-attention modules picked up by
+  _find_feature_attention_modules, so the capture path is version-agnostic.
 """
 
 from __future__ import annotations
@@ -263,6 +270,8 @@ class TabPFNWithColAttn:
         seed: int = 0,
         accept_text: bool = True,
         preprocess_y: bool = False,
+        *,
+        use_v2_weights: bool = False,
     ) -> None:
         """
         ARGS:
@@ -282,6 +291,18 @@ class TabPFNWithColAttn:
             restore the stock ``(None, "safepower")`` so heavy-tailed targets
             are squashed before the transformer — recommended for row probing,
             where attention alignment isn't consumed.
+          use_v2_weights: when True, load the original TabPFN v2 checkpoint
+            (`tabpfn-v2-regressor.ckpt` from `Prior-Labs/TabPFN-v2-reg`)
+            instead of the default v2.6. The cache path is computed via
+            `tabpfn.model_loading.prepend_cache_path`, matching the official
+            `TabPFNRegressor.create_default_for_version(V2)` resolution
+            (auto-downloads on first use; honors `TABPFN_MODEL_CACHE_DIR`).
+            Attention capture works for v2 too — `_find_feature_attention_modules`
+            walks both the v2.6 `blocks[i].per_sample_attention_between_features`
+            and the legacy v2 `transformer_encoder.layers[i].self_attn_between_features`
+            paths, so column-probe alignment stays valid. v2 typically runs
+            with `features_per_group=1`, which makes the (G,G)→(F,F)
+            expansion in `get_col_attn` a no-op.
         """
         if device == "cuda" and not torch.cuda.is_available():
             logger.warning("cuda requested but unavailable; falling back to cpu.")
@@ -295,6 +316,21 @@ class TabPFNWithColAttn:
         self._last_attn: list[tuple[int, torch.Tensor]] | None = None
         self._n_features: int | None = None
         self._feature_has_text: list[bool] | None = None
+        self.use_v2_weights: bool = use_v2_weights
+
+    def _resolve_v2_model_path(self) -> str:
+        """Return the resolved on-disk cache path for the v2 regressor
+        checkpoint, matching how TabPFNRegressor.create_default_for_version
+        does it. Lazy-imported so the wrapper module stays importable
+        without tabpfn installed."""
+        from tabpfn.model_loading import (  # noqa: PLC0415
+            ModelSource,
+            prepend_cache_path,
+        )
+
+        return prepend_cache_path(
+            ModelSource.get_regressor_v2().default_filename
+        )
 
     def _build_regressor(self, *, any_text: bool):
         # Import lazily so importing this module doesn't require tabpfn at top level.
@@ -305,7 +341,7 @@ class TabPFNWithColAttn:
             if (self.accept_text and any_text)
             else "none"
         )
-        return TabPFNRegressor(
+        kwargs: dict = dict(
             n_estimators=1,
             device=self.device,
             random_state=self.seed,
@@ -315,6 +351,13 @@ class TabPFNWithColAttn:
                 preprocess_y=self.preprocess_y,
             ),
         )
+        if self.use_v2_weights:
+            # Pin to the original v2 checkpoint. Without this, TabPFNRegressor
+            # defaults to model_path="auto" → latest (v2.6).
+            v2_path = self._resolve_v2_model_path()
+            logger.info("TabPFNWithColAttn: using v2 weights at %s", v2_path)
+            kwargs["model_path"] = v2_path
+        return TabPFNRegressor(**kwargs)
 
     @staticmethod
     def _prep_X(X, feature_has_text: list[bool] | None):

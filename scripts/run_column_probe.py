@@ -16,7 +16,10 @@ REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "third-party" / "tabpfn" / "src"))
 
-from src.configs import add_openml_cli_args, resolve_openml_args  # noqa: E402
+from src.configs import (  # noqa: E402
+    CONFIG, VALID_TABPFN_WEIGHTS, add_openml_cli_args, resolve_openml_args,
+    tabpfn_weights_tag,
+)
 from src.probing.column_probe import run_column_probe  # noqa: E402
 
 
@@ -32,6 +35,18 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=REPO / "results",
                    help="Results root. Column artefacts go to <out>/<dataset>/column/.")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--tabpfn-weights",
+        choices=list(VALID_TABPFN_WEIGHTS),
+        default=str(CONFIG["tabpfn"].get("weights", "v2_6")),
+        help="Which TabPFN checkpoint to load. 'v2_6' (default, legacy): "
+             "TabPFNRegressor's built-in 'auto' (= latest, v2.6). "
+             "'v2': pin the original v2 weights "
+             "(`tabpfn-v2-regressor.ckpt`); first use auto-downloads. "
+             "Non-default values get their own subtree "
+             "(<out>/weights_<tag>/<dataset>/column/) so v2 and v2.6 "
+             "results coexist as independent ablation runs.",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -44,8 +59,21 @@ def main() -> None:
     if not datasets:
         p.error("provide at least one of: --dataset / --openml-id / --openml-preset / --openml-all")
 
+    # Mirror the row-probe path partition: weights_<tag>/ subtree only when
+    # not the legacy "v2_6" default. Column probe has no σ / test_size /
+    # jitter_scale partitions, so the tag layer goes directly under <out>.
+    out_root = args.out
+    weights_subdir = tabpfn_weights_tag(args.tabpfn_weights)
+    if weights_subdir is not None:
+        out_root = out_root / weights_subdir
+        logging.warning("tabpfn_weights=%s -> column results under %s",
+                        args.tabpfn_weights, out_root)
+
     for ds in datasets:
-        run_column_probe(ds, args.out / ds / "column", args.seed)
+        run_column_probe(
+            ds, out_root / ds / "column", args.seed,
+            tabpfn_weights=args.tabpfn_weights,
+        )
 
 
 if __name__ == "__main__":

@@ -80,6 +80,13 @@ def _parse_jitter_scale_dir(name: str) -> str | None:
     return name[len("jitter_"):] if name.startswith("jitter_") else None
 
 
+def _parse_weights_dir(name: str) -> str | None:
+    """`weights_v2/` -> 'v2'; anything else -> None.
+    The legacy 'v2_6' default has no on-disk subdir; callers tag its
+    entries with 'v2_6' implicitly."""
+    return name[len("weights_"):] if name.startswith("weights_") else None
+
+
 def _discover_feature_distributions(
     results_root: Path,
 ) -> list[dict[str, str]]:
@@ -115,30 +122,33 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
     """Walk `results_root` and emit the JSON-shaped manifest the
     frontend consumes.
 
-    Path layouts handled (any combination present is fine):
-      <results>/sigma_<σ>/<ds>/...                                 LOO,  scale=absolute
-      <results>/sigma_<σ>/test_size_<ts>/<ds>/...                  PROP, scale=absolute
-      <results>/sigma_<σ>/jitter_<scale>/<ds>/...                  LOO,  scale=<scale>
-      <results>/sigma_<σ>/jitter_<scale>/test_size_<ts>/<ds>/...   PROP, scale=<scale>
+    Path layouts handled (any combination of optional layers is fine):
+      <results>/sigma_<σ>/[weights_<w>/][jitter_<scale>/][test_size_<ts>/]<ds>/...
+      <results>/[weights_<w>/]<ds>/column/...   (column probe; σ-independent)
+
+    Tags default to the legacy values when the matching subdir is absent:
+      missing weights_<w>/   -> weights="v2_6"
+      missing jitter_<scale>/-> jitter_scale="absolute"
+      missing test_size_<ts>/-> test_size="loo"
 
     The returned dict has these keys:
-      sigmas:        sorted list of σ tags (e.g. ["1e-2", "1e-3", ...]).
-      test_sizes:    sorted list of test_size labels with "loo" first if
-                     present, then "0.1", "0.2", ... in numeric order.
-      datasets:      sorted list of dataset names that appear anywhere.
-      jitter_scales: sorted list of jitter-scale tags ("absolute",
-                     "per_col_std", ...).
-      chart_types:   list of {id, label} for charts present in any item.
-      images:        list of {sigma, jitter_scale, test_size, dataset,
-                     chart, label, url}.
-      tables:        list of {sigma, jitter_scale, test_size, dataset,
-                     label, jsonl}.
+      sigmas:          sorted σ tags (e.g. ["1e-2", "1e-3", ...]).
+      test_sizes:      sorted test_size labels with "loo" first.
+      datasets:        sorted dataset names appearing anywhere.
+      jitter_scales:   sorted jitter-scale tags.
+      tabpfn_weights:  sorted TabPFN-weights tags ("v2_6", "v2", ...).
+      chart_types:     list of {id, label} for charts present in any item.
+      images:          list of {sigma, jitter_scale, tabpfn_weights,
+                       test_size, dataset, chart, label, url}.
+      tables:          list of {sigma, jitter_scale, tabpfn_weights,
+                       test_size, dataset, label, jsonl}.
     """
     results_root = Path(results_root)
     sigmas: set[str] = set()
     test_sizes: set[str] = set()
     datasets: set[str] = set()
     jitter_scales: set[str] = set()
+    tabpfn_weights_set: set[str] = set()
     chart_ids: set[str] = set()
     images: list[dict[str, str]] = []
     tables: list[dict[str, str]] = []
@@ -146,7 +156,15 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
     if not results_root.exists():
         return _empty_manifest()
 
-    def emit_loo(ds_dir: Path, sigma: str, scale: str) -> None:
+    def _suffix(scale: str, weights: str) -> str:
+        bits = []
+        if weights != "v2_6":
+            bits.append(f"weights={weights}")
+        if scale != "absolute":
+            bits.append(f"scale={scale}")
+        return ("  ·  " + "  ·  ".join(bits)) if bits else ""
+
+    def emit_loo(ds_dir: Path, sigma: str, scale: str, weights: str) -> None:
         """Emit manifest entries for a candidate LOO dataset directory."""
         ds = ds_dir.name
         viz_dir = ds_dir / "viz"
@@ -157,11 +175,13 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
         datasets.add(ds)
         test_sizes.add("loo")
         jitter_scales.add(scale)
+        tabpfn_weights_set.add(weights)
         for cid in charts_here:
             rel = (viz_dir / _CHART_FILENAMES[cid]).relative_to(results_root)
             images.append({
                 "sigma": sigma,
                 "jitter_scale": scale,
+                "tabpfn_weights": weights,
                 "test_size": "loo",
                 "dataset": ds,
                 "chart": cid,
@@ -171,17 +191,19 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
             chart_ids.add(cid)
         if row_jsonl.exists():
             rel = row_jsonl.relative_to(results_root)
-            scale_suffix = "" if scale == "absolute" else f" · scale={scale}"
             tables.append({
                 "sigma": sigma,
                 "jitter_scale": scale,
+                "tabpfn_weights": weights,
                 "test_size": "loo",
                 "dataset": ds,
-                "label": f"{ds} · σ={sigma} · LOO{scale_suffix}",
+                "label": f"{ds} · σ={sigma} · LOO{_suffix(scale, weights)}",
                 "jsonl": rel.as_posix(),
             })
 
-    def emit_prop(ds_dir: Path, sigma: str, ts: str, scale: str) -> None:
+    def emit_prop(
+        ds_dir: Path, sigma: str, ts: str, scale: str, weights: str,
+    ) -> None:
         """Emit manifest entries for a candidate proportional dataset
         directory (under test_size_<ts>/)."""
         ds = ds_dir.name
@@ -193,6 +215,7 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
         datasets.add(ds)
         test_sizes.add(ts)
         jitter_scales.add(scale)
+        tabpfn_weights_set.add(weights)
         for cid in charts_here:
             # Column-probe charts only live at the sigma level
             # (test_size-independent), so silently ignore stale copies
@@ -203,6 +226,7 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
             images.append({
                 "sigma": sigma,
                 "jitter_scale": scale,
+                "tabpfn_weights": weights,
                 "test_size": ts,
                 "dataset": ds,
                 "chart": cid,
@@ -212,30 +236,36 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
             chart_ids.add(cid)
         if row_jsonl.exists():
             rel = row_jsonl.relative_to(results_root)
-            scale_suffix = "" if scale == "absolute" else f" · scale={scale}"
             tables.append({
                 "sigma": sigma,
                 "jitter_scale": scale,
+                "tabpfn_weights": weights,
                 "test_size": ts,
                 "dataset": ds,
-                "label": f"{ds} · σ={sigma} · test_size={ts}{scale_suffix}",
+                "label": (
+                    f"{ds} · σ={sigma} · test_size={ts}"
+                    f"{_suffix(scale, weights)}"
+                ),
                 "jsonl": rel.as_posix(),
             })
 
-    def scan_base(base_dir: Path, sigma: str, scale: str) -> None:
-        """Scan one (sigma, scale) base directory for both LOO and PROP
-        dataset entries."""
-        # LOO datasets: any direct child that isn't a test_size_*/ or
-        # a jitter_*/ subdir is a dataset name.
+    def scan_base(
+        base_dir: Path, sigma: str, scale: str, weights: str,
+    ) -> None:
+        """Scan one (sigma, scale, weights) base directory for both LOO
+        and PROP dataset entries."""
         for child in sorted(base_dir.iterdir()):
             if not child.is_dir():
                 continue
+            # The optional layered subdirs (test_size_/jitter_/weights_)
+            # are recursed into separately; skip them here.
             if child.name.startswith("test_size_"):
                 continue
             if child.name.startswith("jitter_"):
                 continue
-            emit_loo(child, sigma, scale)
-        # PROP datasets: under each test_size_<ts>/<ds>/.
+            if child.name.startswith("weights_"):
+                continue
+            emit_loo(child, sigma, scale, weights)
         for ts_dir in sorted(base_dir.iterdir()):
             ts = _parse_ts_dir(ts_dir.name) if ts_dir.is_dir() else None
             if ts is None:
@@ -243,7 +273,19 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
             for ds_dir in sorted(ts_dir.iterdir()):
                 if not ds_dir.is_dir():
                     continue
-                emit_prop(ds_dir, sigma, ts, scale)
+                emit_prop(ds_dir, sigma, ts, scale, weights)
+
+    def scan_jitter_layer(parent: Path, sigma: str, weights: str) -> None:
+        """Walk both the legacy "absolute" layout (parent itself) and
+        every jitter_<scale>/ child of `parent`."""
+        scan_base(parent, sigma, "absolute", weights)
+        for child in sorted(parent.iterdir()):
+            if not child.is_dir():
+                continue
+            scale = _parse_jitter_scale_dir(child.name)
+            if scale is None:
+                continue
+            scan_base(child, sigma, scale, weights)
 
     for sigma_dir in sorted(results_root.iterdir()):
         sigma = _parse_sigma_dir(sigma_dir.name) if sigma_dir.is_dir() else None
@@ -251,21 +293,19 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
             continue
         sigmas.add(sigma)
 
-        # Default scale ("absolute") sits directly under sigma_<σ>/ — that's
-        # the legacy layout. Pre-existing trees are read transparently.
-        scan_base(sigma_dir, sigma, "absolute")
+        # Default weights ("v2_6") sit directly under sigma_<σ>/ — that's
+        # the legacy layout. Pre-existing trees read transparently.
+        scan_jitter_layer(sigma_dir, sigma, "v2_6")
 
-        # Non-default scales sit under jitter_<scale>/ (sibling of the
-        # legacy LOO/test_size dirs).
-        for scale_dir in sorted(sigma_dir.iterdir()):
-            scale = (
-                _parse_jitter_scale_dir(scale_dir.name)
-                if scale_dir.is_dir()
-                else None
-            )
-            if scale is None:
+        # Non-default weights sit under sigma_<σ>/weights_<tag>/ (sibling
+        # of legacy LOO / test_size / jitter_*).
+        for child in sorted(sigma_dir.iterdir()):
+            if not child.is_dir():
                 continue
-            scan_base(scale_dir, sigma, scale)
+            weights = _parse_weights_dir(child.name)
+            if weights is None:
+                continue
+            scan_jitter_layer(child, sigma, weights)
 
     feature_dists = _discover_feature_distributions(results_root)
     # Some datasets may have a feature_dist PNG but no probe results yet
@@ -278,6 +318,7 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
         "test_sizes": _order_test_sizes(test_sizes),
         "datasets": sorted(datasets),
         "jitter_scales": _order_jitter_scales(jitter_scales),
+        "tabpfn_weights": _order_tabpfn_weights(tabpfn_weights_set),
         "chart_types": [
             {"id": cid, "label": _CHART_LABELS[cid]}
             for cid, _, _ in _CHART_FILES if cid in chart_ids
@@ -296,6 +337,12 @@ def _order_jitter_scales(scales: set[str]) -> list[str]:
     return (["absolute"] if "absolute" in scales else []) + rest
 
 
+def _order_tabpfn_weights(weights: set[str]) -> list[str]:
+    """'v2_6' first (legacy/default), then the rest alphabetically."""
+    rest = sorted(w for w in weights if w != "v2_6")
+    return (["v2_6"] if "v2_6" in weights else []) + rest
+
+
 def _decimal_places() -> int:
     """Frontend display precision (used for both .toFixed and .toExponential
     in JS). Sourced from CONFIG['viz']['decimal_places']; falls back to 4
@@ -311,6 +358,7 @@ def _empty_manifest() -> dict[str, Any]:
     return {
         "sigmas": [], "test_sizes": [], "datasets": [],
         "jitter_scales": [],
+        "tabpfn_weights": [],
         "chart_types": [], "images": [], "tables": [],
         "feature_distributions": [],
         "decimal_places": _decimal_places(),

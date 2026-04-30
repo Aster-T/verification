@@ -117,6 +117,16 @@ CONFIG = {
     "tabpfn": {
         "device": "cuda",
         "ignore_pretraining_limits": True,
+        # Which TabPFN checkpoint to load. "v2_6" (default) lets
+        # TabPFNRegressor resolve to its built-in "auto" — the latest
+        # bundled checkpoint (v2.6 regressor at the time of writing).
+        # "v2" pins the original v2 release (`tabpfn-v2-regressor.ckpt`
+        # from `Prior-Labs/TabPFN-v2-reg`); first use auto-downloads to
+        # the cache. Both row and column probes consume this knob; CLI
+        # `--tabpfn-weights` overrides per invocation. Non-default values
+        # land in their own subtree (`weights_<tag>/`) so each weights
+        # ablation coexists with the default without overwriting.
+        "weights": "v2_6",
     },
     # -------------------------------------------------------------------------
     # Column probe (03)
@@ -464,6 +474,29 @@ def jitter_scale_tag(scale: str) -> str | None:
             f"jitter_scale must be one of {VALID_JITTER_SCALES!r}, got {scale!r}"
         )
     return None if scale == "absolute" else f"jitter_{scale}"
+
+
+# TabPFN checkpoint ablation: v2_6 is the default ("auto" inside TabPFN —
+# i.e. tabpfn-v2.6-regressor); v2 pins the original v2 weights. Adding new
+# values here is enough to make them flow through CLI, path partition,
+# manifest discovery, and frontend filter — all consume this list.
+VALID_TABPFN_WEIGHTS: tuple[str, ...] = ("v2_6", "v2")
+
+
+def tabpfn_weights_tag(weights: str) -> str | None:
+    """Return the path-fragment tag for a tabpfn_weights value, or None
+    when `weights == "v2_6"` (the legacy default — no extra subdirectory).
+
+    Examples:
+      tabpfn_weights_tag("v2_6") -> None
+      tabpfn_weights_tag("v2")   -> "weights_v2"
+    """
+    if weights not in VALID_TABPFN_WEIGHTS:
+        raise ValueError(
+            f"tabpfn_weights must be one of {VALID_TABPFN_WEIGHTS!r}, "
+            f"got {weights!r}"
+        )
+    return None if weights == "v2_6" else f"weights_{weights}"
 
 
 def test_size_tag(test_size: float) -> str:

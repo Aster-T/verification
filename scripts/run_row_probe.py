@@ -21,8 +21,9 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "third-party" / "tabpfn" / "src"))
 
 from src.configs import (  # noqa: E402
-    CONFIG, VALID_JITTER_SCALES, add_openml_cli_args, jitter_scale_tag,
-    resolve_openml_args, sigma_tag, test_size_tag,
+    CONFIG, VALID_JITTER_SCALES, VALID_TABPFN_WEIGHTS, add_openml_cli_args,
+    jitter_scale_tag, resolve_openml_args, sigma_tag, tabpfn_weights_tag,
+    test_size_tag,
 )
 from src.probing.row_probe import VALID_SPLIT_MODES, run_row_probe  # noqa: E402
 
@@ -125,6 +126,18 @@ def main() -> None:
              "unaffected (it always factorizes internally).",
     )
     p.add_argument(
+        "--tabpfn-weights",
+        choices=list(VALID_TABPFN_WEIGHTS),
+        default=str(CONFIG["tabpfn"].get("weights", "v2_6")),
+        help="Which TabPFN checkpoint to load. 'v2_6' (default, legacy): "
+             "let TabPFNRegressor resolve to its built-in 'auto' (latest "
+             "bundled = v2.6). 'v2': pin the original v2 weights "
+             "(`tabpfn-v2-regressor.ckpt`); auto-downloads on first use. "
+             "Non-default values get their own subtree "
+             "(<out>/sigma_<σ>/weights_<tag>/...) so v2 and v2.6 results "
+             "coexist as independent ablation runs.",
+    )
+    p.add_argument(
         "--parallel-k",
         type=int,
         default=None,
@@ -152,21 +165,31 @@ def main() -> None:
     # When --jitter-sigma is given, partition the results tree by sigma so
     # sweeping multiple sigmas doesn't overwrite each other:
     #   <out>/sigma_<σ>/<dataset>/row/...
+    # When --tabpfn-weights != "v2_6", insert a weights_<tag>/ layer so v2
+    # and v2.6 ablations live in disjoint subtrees. Placed *above* the
+    # jitter_<scale>/ layer so a v2 run can still A/B against the absolute
+    # vs per_col_std jitter ablations independently:
+    #   <out>/sigma_<σ>/weights_<tag>/<dataset>/row/...
     # When --jitter-scale != "absolute", insert a jitter_<scale>/ layer so
     # absolute and per_col_std runs (the two ablation siblings) live in
     # disjoint subtrees:
-    #   <out>/sigma_<σ>/jitter_<scale>/<dataset>/row/...
-    # The "absolute" default has no extra layer — pre-existing trees stay
-    # bit-for-bit compatible.
+    #   <out>/sigma_<σ>/[weights_<tag>/]jitter_<scale>/<dataset>/row/...
+    # All non-default tags drop out for the legacy default — pre-existing
+    # trees stay bit-for-bit compatible.
     # In proportional mode we additionally partition by test_size so the
     # 9 test_size sweep produces 9 distinct result subtrees:
-    #   <out>/sigma_<σ>/[jitter_<scale>/]test_size_<ts>/<dataset>/row/...
+    #   <out>/sigma_<σ>/[weights_<tag>/][jitter_<scale>/]test_size_<ts>/<dataset>/row/...
     # LOO output paths are NOT partitioned by test_size (LOO ignores it).
     out_root = args.out
     if args.jitter_sigma is not None:
         out_root = out_root / f"sigma_{sigma_tag(args.jitter_sigma)}"
         logging.warning("jitter_sigma=%s -> results under %s",
                         args.jitter_sigma, out_root)
+    weights_subdir = tabpfn_weights_tag(args.tabpfn_weights)
+    if weights_subdir is not None:
+        out_root = out_root / weights_subdir
+        logging.warning("tabpfn_weights=%s -> results under %s",
+                        args.tabpfn_weights, out_root)
     scale_subdir = jitter_scale_tag(args.jitter_scale)
     if scale_subdir is not None:
         out_root = out_root / scale_subdir
@@ -195,6 +218,7 @@ def main() -> None:
             jitter_sigma=args.jitter_sigma,
             jitter_scale=args.jitter_scale,
             tabpfn_numeric=args.tabpfn_numeric,
+            tabpfn_weights=args.tabpfn_weights,
             parallel_k=args.parallel_k,
         )
 

@@ -38,22 +38,28 @@ def discover_sigmas(results_root: Path) -> list[Path]:
 
 
 def _regen_under(
-    base_dir: Path, sigma: str, scale: str,
+    base_dir: Path, sigma: str, scale: str, weights: str = "v2_6",
 ) -> tuple[int, int, int]:
-    """Walk one (sigma, scale) base directory and rebuild every viz/ that
-    has either row metrics or a column-probe MLR npz alongside. The base
-    is either `sigma_<σ>/` (legacy "absolute" layout) or
-    `sigma_<σ>/jitter_<scale>/` (the new ablation siblings).
+    """Walk one (sigma, weights, scale) base directory and rebuild every
+    viz/ that has either row metrics or a column-probe MLR npz alongside.
 
-    Returns (row_curves_done, heatmaps_done, errors). Logs include both
-    sigma and scale so multi-scale runs are traceable.
+    Path layouts handled:
+      sigma_<σ>/                                    (legacy)
+      sigma_<σ>/jitter_<scale>/                     (jitter ablation)
+      sigma_<σ>/weights_<w>/                        (weights ablation)
+      sigma_<σ>/weights_<w>/jitter_<scale>/         (both)
+
+    Returns (row_curves_done, heatmaps_done, errors).
     """
     rc, hm, err = 0, 0, 0
-    tag = f"{sigma} · {scale}"
+    bits = [sigma]
+    if weights != "v2_6":
+        bits.append(f"weights={weights}")
+    if scale != "absolute":
+        bits.append(f"scale={scale}")
+    tag = " · ".join(bits)
 
-    # 1) base-level: LOO row probe + column probe (column probe lives on
-    #    the legacy "absolute" path only; per_col_std subtree won't have
-    #    a column/ dir, but we still try and silently move on if missing).
+    # 1) base-level: LOO row probe + column probe.
     for child in sorted(base_dir.iterdir()):
         if not child.is_dir():
             continue
@@ -61,6 +67,8 @@ def _regen_under(
         if child.name.startswith("test_size_"):
             continue
         if child.name.startswith("jitter_"):
+            continue
+        if child.name.startswith("weights_"):
             continue
         ds = child.name
         viz_dir = child / "viz"
@@ -115,20 +123,39 @@ def _regen_under(
     return rc, hm, err
 
 
-def regen_one_sigma(sigma_root: Path) -> tuple[int, int, int]:
-    """Regenerate every viz dir under sigma_root that has artefacts. Walks
-    both the legacy "absolute" layout (sigma_<σ>/<ds>/...) and the new
-    jitter-scale ablation subtrees (sigma_<σ>/jitter_<scale>/<ds>/...)."""
-    sigma = sigma_root.name[len("sigma_"):]
-    rc, hm, err = _regen_under(sigma_root, sigma, "absolute")
-    for child in sorted(sigma_root.iterdir()):
+def _walk_jitter_layer(
+    parent: Path, sigma: str, weights: str,
+) -> tuple[int, int, int]:
+    """Walk both the legacy "absolute" layout (parent itself) and every
+    jitter_<scale>/ child of parent. Returns aggregated counters."""
+    rc, hm, err = _regen_under(parent, sigma, "absolute", weights)
+    for child in sorted(parent.iterdir()):
         if not child.is_dir() or not child.name.startswith("jitter_"):
             continue
         scale = child.name[len("jitter_"):]
-        s_rc, s_hm, s_err = _regen_under(child, sigma, scale)
+        s_rc, s_hm, s_err = _regen_under(child, sigma, scale, weights)
         rc += s_rc
         hm += s_hm
         err += s_err
+    return rc, hm, err
+
+
+def regen_one_sigma(sigma_root: Path) -> tuple[int, int, int]:
+    """Regenerate every viz dir under sigma_root that has artefacts. Walks
+    the legacy "absolute" layout, jitter-scale ablation subtrees, AND the
+    new weights-ablation subtrees (sigma_<σ>/weights_<w>/[jitter_<scale>/])."""
+    sigma = sigma_root.name[len("sigma_"):]
+    # Default weights (v2_6) — legacy path + jitter ablations under sigma.
+    rc, hm, err = _walk_jitter_layer(sigma_root, sigma, "v2_6")
+    # Non-default weights — each weights_<w>/ also gets the jitter walk.
+    for child in sorted(sigma_root.iterdir()):
+        if not child.is_dir() or not child.name.startswith("weights_"):
+            continue
+        weights = child.name[len("weights_"):]
+        w_rc, w_hm, w_err = _walk_jitter_layer(child, sigma, weights)
+        rc += w_rc
+        hm += w_hm
+        err += w_err
     return rc, hm, err
 
 

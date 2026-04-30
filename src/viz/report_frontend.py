@@ -560,7 +560,8 @@ FRONTEND_HTML = r"""<!doctype html>
   const STATE = {
     manifest: null,
     filters: { sigma: new Set(), test_size: new Set(), dataset: new Set(),
-               jitter_scale: new Set(), chart: new Set() },
+               jitter_scale: new Set(), tabpfn_weights: new Set(),
+               chart: new Set() },
     compare: [],   // [{key, src, label}]
     macroCache: new Map(),  // url → {data, ts}
     macroToken: 0,          // incremented to invalidate stale fetches
@@ -649,27 +650,32 @@ FRONTEND_HTML = r"""<!doctype html>
     const m = STATE.manifest;
     const scales = (m.jitter_scales && m.jitter_scales.length)
       ? m.jitter_scales : ["absolute"];
+    const weights = (m.tabpfn_weights && m.tabpfn_weights.length)
+      ? m.tabpfn_weights : ["v2_6"];
     const saved = loadFilters();
     if (saved && saved.sigma.size && saved.dataset.size) {
       // restore but intersect with what's currently available
-      STATE.filters.sigma        = new Set([...saved.sigma].filter(v => m.sigmas.includes(v)));
-      STATE.filters.test_size    = new Set([...saved.test_size].filter(v => m.test_sizes.includes(v)));
-      STATE.filters.dataset      = new Set([...saved.dataset].filter(v => m.datasets.includes(v)));
-      STATE.filters.jitter_scale = new Set([...(saved.jitter_scale || [])].filter(v => scales.includes(v)));
-      STATE.filters.chart        = new Set([...saved.chart].filter(v => m.chart_types.some(c => c.id === v)));
+      STATE.filters.sigma          = new Set([...saved.sigma].filter(v => m.sigmas.includes(v)));
+      STATE.filters.test_size      = new Set([...saved.test_size].filter(v => m.test_sizes.includes(v)));
+      STATE.filters.dataset        = new Set([...saved.dataset].filter(v => m.datasets.includes(v)));
+      STATE.filters.jitter_scale   = new Set([...(saved.jitter_scale || [])].filter(v => scales.includes(v)));
+      STATE.filters.tabpfn_weights = new Set([...(saved.tabpfn_weights || [])].filter(v => weights.includes(v)));
+      STATE.filters.chart          = new Set([...saved.chart].filter(v => m.chart_types.some(c => c.id === v)));
       // if any dim ended up empty after the intersect, fall through to defaults
       if (STATE.filters.sigma.size && STATE.filters.test_size.size &&
           STATE.filters.dataset.size && STATE.filters.jitter_scale.size &&
+          STATE.filters.tabpfn_weights.size &&
           STATE.filters.chart.size) return;
     }
     // ----- defaults: just enough to be useful, not so much it floods -----
-    STATE.filters.sigma        = new Set(m.sigmas.slice(0, 1));
-    STATE.filters.test_size    = new Set(m.test_sizes.includes("loo") ? ["loo"] : m.test_sizes.slice(0, 1));
-    STATE.filters.dataset      = new Set(m.datasets);
-    // Default to "absolute" only — keeps the legacy view unchanged on first
-    // load. User flips on per_col_std (or both, for ablation A/B) explicitly.
-    STATE.filters.jitter_scale = new Set(scales.includes("absolute") ? ["absolute"] : scales.slice(0, 1));
-    STATE.filters.chart        = new Set(m.chart_types.some(c => c.id === "row_curve") ? ["row_curve"] : m.chart_types.slice(0, 1).map(c => c.id));
+    STATE.filters.sigma          = new Set(m.sigmas.slice(0, 1));
+    STATE.filters.test_size      = new Set(m.test_sizes.includes("loo") ? ["loo"] : m.test_sizes.slice(0, 1));
+    STATE.filters.dataset        = new Set(m.datasets);
+    // Default to legacy values only — keeps the first-load view unchanged.
+    // User flips on the ablation siblings (per_col_std / v2) explicitly.
+    STATE.filters.jitter_scale   = new Set(scales.includes("absolute") ? ["absolute"] : scales.slice(0, 1));
+    STATE.filters.tabpfn_weights = new Set(weights.includes("v2_6") ? ["v2_6"] : weights.slice(0, 1));
+    STATE.filters.chart          = new Set(m.chart_types.some(c => c.id === "row_curve") ? ["row_curve"] : m.chart_types.slice(0, 1).map(c => c.id));
     saveFilters();
   }
 
@@ -678,12 +684,15 @@ FRONTEND_HTML = r"""<!doctype html>
     const m = STATE.manifest;
     const scales = (m.jitter_scales && m.jitter_scales.length)
       ? m.jitter_scales : ["absolute"];
+    const weights = (m.tabpfn_weights && m.tabpfn_weights.length)
+      ? m.tabpfn_weights : ["v2_6"];
     const groups = [
-      {dim: "sigma",        title: "σ (jitter)",   values: m.sigmas.map(v => ({id: v, label: v}))},
-      {dim: "test_size",    title: "test_size",    values: m.test_sizes.map(v => ({id: v, label: v === "loo" ? "LOO" : v}))},
-      {dim: "dataset",      title: "Dataset",      values: m.datasets.map(v => ({id: v, label: v}))},
-      {dim: "jitter_scale", title: "Jitter scale", values: scales.map(v => ({id: v, label: v}))},
-      {dim: "chart",        title: "Chart type",   values: m.chart_types.map(c => ({id: c.id, label: c.label}))},
+      {dim: "sigma",          title: "σ (jitter)",      values: m.sigmas.map(v => ({id: v, label: v}))},
+      {dim: "test_size",      title: "test_size",       values: m.test_sizes.map(v => ({id: v, label: v === "loo" ? "LOO" : v}))},
+      {dim: "dataset",        title: "Dataset",         values: m.datasets.map(v => ({id: v, label: v}))},
+      {dim: "jitter_scale",   title: "Jitter scale",    values: scales.map(v => ({id: v, label: v}))},
+      {dim: "tabpfn_weights", title: "TabPFN weights",  values: weights.map(v => ({id: v, label: v}))},
+      {dim: "chart",          title: "Chart type",      values: m.chart_types.map(c => ({id: c.id, label: c.label}))},
     ];
     const grid = document.getElementById("filter-grid");
     grid.innerHTML = "";
@@ -737,6 +746,9 @@ FRONTEND_HTML = r"""<!doctype html>
       } else if (dim === "jitter_scale") {
         avail = (STATE.manifest.jitter_scales && STATE.manifest.jitter_scales.length)
           ? STATE.manifest.jitter_scales : ["absolute"];
+      } else if (dim === "tabpfn_weights") {
+        avail = (STATE.manifest.tabpfn_weights && STATE.manifest.tabpfn_weights.length)
+          ? STATE.manifest.tabpfn_weights : ["v2_6"];
       } else {
         avail = STATE.manifest[dim === "sigma" ? "sigmas"
                 : (dim === "dataset" ? "datasets" : "test_sizes")];
@@ -765,22 +777,27 @@ FRONTEND_HTML = r"""<!doctype html>
   }
 
   // ---------- Filter predicates ----------
-  // Items written by older servers may not carry `jitter_scale`; treat
-  // missing as "absolute" (the only scale the legacy pipeline produced).
+  // Items written by older servers may not carry `jitter_scale` or
+  // `tabpfn_weights`; treat missing as the legacy default for back-compat.
   function itemScale(it) {
     return it.jitter_scale || "absolute";
+  }
+  function itemWeights(it) {
+    return it.tabpfn_weights || "v2_6";
   }
   function passesImageFilter(it) {
     const f = STATE.filters;
     return f.sigma.has(it.sigma) && f.test_size.has(it.test_size)
         && f.dataset.has(it.dataset) && f.chart.has(it.chart)
-        && f.jitter_scale.has(itemScale(it));
+        && f.jitter_scale.has(itemScale(it))
+        && f.tabpfn_weights.has(itemWeights(it));
   }
   function passesTableFilter(it) {
     const f = STATE.filters;
     return f.sigma.has(it.sigma) && f.test_size.has(it.test_size)
         && f.dataset.has(it.dataset)
-        && f.jitter_scale.has(itemScale(it));
+        && f.jitter_scale.has(itemScale(it))
+        && f.tabpfn_weights.has(itemWeights(it));
   }
 
   // ---------- Feature distributions (dataset-level box plots) ----------
@@ -842,13 +859,17 @@ FRONTEND_HTML = r"""<!doctype html>
       const key = it.url;  // url is unique per image
       const inCompare = compareSet.has(key);
       const scale = itemScale(it);
+      const weights = itemWeights(it);
       const scaleTag = scale === "absolute"
         ? "" : `<span>scale ${escapeHtml(scale)}</span>`;
+      const weightsTag = weights === "v2_6"
+        ? "" : `<span>weights ${escapeHtml(weights)}</span>`;
       const tags = `
         <div class="tags">
           <span>σ ${escapeHtml(it.sigma)}</span>
           <span>${it.test_size === "loo" ? "LOO" : "test_size " + escapeHtml(it.test_size)}</span>
           ${scaleTag}
+          ${weightsTag}
         </div>`;
       return `
         <div class="image-card">
@@ -876,13 +897,17 @@ FRONTEND_HTML = r"""<!doctype html>
 
   function captionLabel(it) {
     const scale = itemScale(it);
+    const weights = itemWeights(it);
     const scalePart = scale === "absolute" ? "" : ` · scale=${scale}`;
-    return `${it.dataset} · σ=${it.sigma} · ${it.test_size === "loo" ? "LOO" : "ts=" + it.test_size}${scalePart} · ${it.label}`;
+    const weightsPart = weights === "v2_6" ? "" : ` · weights=${weights}`;
+    return `${it.dataset} · σ=${it.sigma} · ${it.test_size === "loo" ? "LOO" : "ts=" + it.test_size}${scalePart}${weightsPart} · ${it.label}`;
   }
 
   function imageSortKey(a, b) {
     if (a.dataset !== b.dataset) return a.dataset.localeCompare(b.dataset);
     if (a.sigma   !== b.sigma)   return a.sigma.localeCompare(b.sigma);
+    const wa = itemWeights(a), wb = itemWeights(b);
+    if (wa !== wb) return wa.localeCompare(wb);
     const sa = itemScale(a), sb = itemScale(b);
     if (sa !== sb) return sa.localeCompare(sb);
     if (a.test_size !== b.test_size) {
@@ -1043,11 +1068,11 @@ FRONTEND_HTML = r"""<!doctype html>
 
   // ---------- Macro summary ----------
   function computeMacroPairs() {
-    // Returns one entry per (σ, jitter_scale, dataset) covered by the
-    // current filters — splitting by scale so absolute vs per_col_std
-    // ablations show up as separate cards instead of being averaged
-    // together. Each entry buckets jsonls by test_size for the per-ts
-    // drilldown.
+    // Returns one entry per (σ, jitter_scale, tabpfn_weights, dataset)
+    // covered by the current filters — splitting by scale and weights so
+    // ablation siblings show up as separate cards instead of being
+    // averaged together. Each entry buckets jsonls by test_size for the
+    // per-ts drilldown.
     const f = STATE.filters;
     const pairs = new Map();
     for (const t of STATE.manifest.tables) {
@@ -1056,11 +1081,14 @@ FRONTEND_HTML = r"""<!doctype html>
       if (!f.dataset.has(t.dataset)) continue;
       const scale = itemScale(t);
       if (!f.jitter_scale.has(scale)) continue;
-      const key = t.sigma + "|" + scale + "|" + t.dataset;
+      const weights = itemWeights(t);
+      if (!f.tabpfn_weights.has(weights)) continue;
+      const key = t.sigma + "|" + scale + "|" + weights + "|" + t.dataset;
       let entry = pairs.get(key);
       if (!entry) {
         entry = { sigma: t.sigma, dataset: t.dataset,
                   jitter_scale: scale,
+                  tabpfn_weights: weights,
                   byTs: new Map(), allJsonls: [] };
         pairs.set(key, entry);
       }
@@ -1071,6 +1099,8 @@ FRONTEND_HTML = r"""<!doctype html>
     return Array.from(pairs.values()).sort((a, b) => {
       if (a.dataset !== b.dataset) return a.dataset.localeCompare(b.dataset);
       if (a.sigma   !== b.sigma)   return a.sigma.localeCompare(b.sigma);
+      if (a.tabpfn_weights !== b.tabpfn_weights)
+        return a.tabpfn_weights.localeCompare(b.tabpfn_weights);
       return a.jitter_scale.localeCompare(b.jitter_scale);
     });
   }
@@ -1169,10 +1199,14 @@ FRONTEND_HTML = r"""<!doctype html>
     const scaleTag = (pair.jitter_scale && pair.jitter_scale !== "absolute")
       ? '<span class="sig">scale=' + escapeHtml(pair.jitter_scale) + '</span>'
       : "";
+    const weightsTag = (pair.tabpfn_weights && pair.tabpfn_weights !== "v2_6")
+      ? '<span class="sig">weights=' + escapeHtml(pair.tabpfn_weights) + '</span>'
+      : "";
     const headHtml = '<div class="macro-head">'
       + '<span class="ds">' + escapeHtml(pair.dataset) + '</span>'
       + '<span class="sig">σ=' + escapeHtml(pair.sigma) + '</span>'
       + scaleTag
+      + weightsTag
       + '<span class="n">' + overall.n_records + ' rec'
       + (overall.n_records === 1 ? "" : "s") + skipNote + '</span>'
       + '</div>';
