@@ -965,6 +965,7 @@ def run_row_probe(
     k_list: list[int],
     modes: list[str],
     seeds: list[int],
+    include_mlr: bool = True,
     include_tabpfn: bool = True,
     split_mode: str = "proportional",
     test_size: float | None = None,
@@ -1038,7 +1039,14 @@ def run_row_probe(
     row_dir = ensure_dir(row_dir)
     jsonl_path = row_dir / "metrics.jsonl"
 
-    models = ["mlr"] + (["tabpfn"] if include_tabpfn else [])
+    models = (
+        (["mlr"] if include_mlr else [])
+        + (["tabpfn"] if include_tabpfn else [])
+    )
+    if not models:
+        raise ValueError(
+            "include_mlr=False and include_tabpfn=False — nothing to do."
+        )
 
     effective_sigma = (
         jitter_sigma if jitter_sigma is not None

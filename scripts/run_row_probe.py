@@ -119,6 +119,20 @@ def main() -> None:
         "--no-tabpfn", action="store_true", help="Skip TabPFN branch (MLR only)."
     )
     p.add_argument(
+        "--no-mlr", action="store_true",
+        help="Skip MLR branch (TabPFN only). Mutually exclusive with "
+             "--no-tabpfn — at least one model must run.",
+    )
+    p.add_argument(
+        "--no-weights-partition", action="store_true",
+        help="Skip the auto-appended weights_<tag>/ subdir on the output "
+             "path. Use when you want to control the destination fully via "
+             "--out (e.g. landing v2 results at a custom name like "
+             "results/tabpfn_v2/<ds>/...). Has no effect when "
+             "--tabpfn-weights is the default 'v2_6' (no auto-append "
+             "happens then either way).",
+    )
+    p.add_argument(
         "--tabpfn-numeric", action="store_true",
         help="Pass numeric (per-column factorized) X to TabPFN instead of "
              "raw strings. Default: TabPFN receives the original text "
@@ -161,6 +175,8 @@ def main() -> None:
         p.error(
             "provide at least one of: --dataset / --openml-id / --openml-preset / --openml-all"
         )
+    if args.no_mlr and args.no_tabpfn:
+        p.error("--no-mlr and --no-tabpfn together leave nothing to run.")
 
     # When --jitter-sigma is given, partition the results tree by sigma so
     # sweeping multiple sigmas doesn't overwrite each other:
@@ -186,10 +202,16 @@ def main() -> None:
         logging.warning("jitter_sigma=%s -> results under %s",
                         args.jitter_sigma, out_root)
     weights_subdir = tabpfn_weights_tag(args.tabpfn_weights)
-    if weights_subdir is not None:
+    if weights_subdir is not None and not args.no_weights_partition:
         out_root = out_root / weights_subdir
         logging.warning("tabpfn_weights=%s -> results under %s",
                         args.tabpfn_weights, out_root)
+    elif weights_subdir is not None and args.no_weights_partition:
+        logging.warning(
+            "tabpfn_weights=%s but --no-weights-partition is set: "
+            "skipping the weights_%s/ subdir, using --out as-is",
+            args.tabpfn_weights, args.tabpfn_weights,
+        )
     scale_subdir = jitter_scale_tag(args.jitter_scale)
     if scale_subdir is not None:
         out_root = out_root / scale_subdir
@@ -212,6 +234,7 @@ def main() -> None:
             args.k_list,
             args.modes,
             args.seeds,
+            include_mlr=not args.no_mlr,
             include_tabpfn=not args.no_tabpfn,
             split_mode=args.split_mode,
             test_size=args.test_size,

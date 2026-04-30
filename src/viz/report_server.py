@@ -87,6 +87,51 @@ def _parse_weights_dir(name: str) -> str | None:
     return name[len("weights_"):] if name.startswith("weights_") else None
 
 
+# Sentinel sigma value for entries that come from "baseline" top-level
+# folders (e.g. `results/mlr/`, `results/tabpfn_v2_6/`) — these were
+# produced without `--jitter-sigma`, so they have no σ associated. Using
+# a non-numeric token keeps `_sigma_sort_key` from blowing up and gives
+# the frontend a single distinct group to filter on.
+_NO_SIGMA = "—"
+
+
+def _looks_like_dataset_group(top: Path) -> bool:
+    """Return True when `top` is the parent of one or more dataset
+    directories — i.e. some `<top>/<ds>/row/metrics.jsonl` or
+    `<top>/<ds>/column/mlr.npz` exists. Used to decide whether a
+    non-`sigma_*` top-level folder under `results/` should be treated
+    as a baseline experiment group."""
+    if not top.is_dir():
+        return False
+    for child in top.iterdir():
+        if not child.is_dir():
+            continue
+        if (child / "row" / "metrics.jsonl").exists():
+            return True
+        if (child / "column" / "mlr.npz").exists():
+            return True
+    return False
+
+
+def _baseline_weights_label(folder_name: str) -> str:
+    """Map a top-level baseline folder name to a tabpfn_weights tag.
+
+    The shipped naming used by `scripts/run_ships_loo.py`:
+      "mlr"          -> "mlr-only"   (MLR records only, no TabPFN)
+      "tabpfn_v2"    -> "v2"         (TabPFN v2 records)
+      "tabpfn_v2_6"  -> "v2_6"       (TabPFN v2.6 records)
+      "tabpfn_<x>"   -> "<x>"        (any future TabPFN ablation)
+      anything else  -> the folder name as-is, so the user can drop a
+                        custom baseline (e.g. "xgboost") and have it
+                        surface in the filter without code changes.
+    """
+    if folder_name == "mlr":
+        return "mlr-only"
+    if folder_name.startswith("tabpfn_"):
+        return folder_name[len("tabpfn_"):]
+    return folder_name
+
+
 def _discover_feature_distributions(
     results_root: Path,
 ) -> list[dict[str, str]]:
@@ -307,6 +352,27 @@ def build_manifest(results_root: Path) -> dict[str, Any]:
                 continue
             scan_jitter_layer(child, sigma, weights)
 
+    # "Baseline" top-level folders: anything else under results_root that
+    # contains <ds>/row/metrics.jsonl (or column/mlr.npz) directly. This
+    # picks up the ship LOO baseline layout produced by
+    # `scripts/run_ships_loo.py` — `results/mlr/`, `results/tabpfn_v2_6/`,
+    # `results/tabpfn_v2/` — which doesn't have a sigma_<σ>/ wrapper. We
+    # synthesize sigma="—" and infer the tabpfn_weights tag from the
+    # top-level folder name; everything else stays at its default
+    # (jitter_scale="absolute", and any test_size_<ts>/ subdir is honored).
+    _SKIP_NAMES = {"feature_distributions"}
+    for top in sorted(results_root.iterdir()):
+        if not top.is_dir():
+            continue
+        if top.name in _SKIP_NAMES:
+            continue
+        if top.name.startswith("sigma_"):
+            continue
+        if not _looks_like_dataset_group(top):
+            continue
+        sigmas.add(_NO_SIGMA)
+        scan_jitter_layer(top, _NO_SIGMA, _baseline_weights_label(top.name))
+
     feature_dists = _discover_feature_distributions(results_root)
     # Some datasets may have a feature_dist PNG but no probe results yet
     # — surface them in the dataset filter so the user can still see them.
@@ -369,10 +435,12 @@ def _sigma_sort_key(s: str) -> float:
     # "1e-2" < "1e-3" numerically: smaller exponents = larger value, but
     # we want the natural reading order (1e-2, 1e-3, ..., 1e-6). So sort
     # by descending magnitude of σ.
+    # Non-numeric sentinels (`_NO_SIGMA = "—"` for baseline folders) sort
+    # AFTER all real σs so the legacy view stays at the top of the filter.
     try:
         return -float(s)
     except ValueError:
-        return 0.0
+        return float("inf")
 
 
 def _order_test_sizes(values: set[str]) -> list[str]:

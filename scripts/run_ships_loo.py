@@ -1,15 +1,27 @@
 #!/usr/bin/env python
-"""LOO baseline sweep on the local ship-* datasets.
+"""LOO baseline sweep on the local ship-* datasets, one folder per model.
 
-For each `datasets/ship-*/` directory with a `meta.json`, run row probe in
-LOO mode with k=1 and seeds 1,2,3. This is the "no duplication" baseline:
-context is the original (N-1) rows for each held-out point, no jitter
-matters (anchor preservation makes k=1+jitter numerically identical to
-exact, so we skip jitter to save half the calls).
+For each `datasets/ship-*/` directory with a `meta.json`, run row probe
+in LOO mode with k=1 and seeds 1,2,3 — but split into THREE separate
+passes per dataset, one per model variant, each landing in its own
+top-level results folder so different models never share a metrics.jsonl:
 
-Outputs land at the unpartitioned default — `results/<dataset>/row/...` —
-since no σ / test_size / jitter_scale / tabpfn_weights override is passed.
-That keeps the baseline tidy and out of the per-σ ablation subtrees.
+    results/mlr/<dataset>/row/...           (MLR only,    --no-tabpfn)
+    results/tabpfn_v2_6/<dataset>/row/...   (TabPFN v2.6, --no-mlr)
+    results/tabpfn_v2/<dataset>/row/...     (TabPFN v2,   --no-mlr)
+
+`k=1 + LOO` is the "no duplication" baseline. Anchor preservation makes
+k=1+jitter numerically identical to exact, so we record exact only —
+flip MODES to "exact,jitter" if you specifically want jitter rows.
+
+Output flags used:
+  MLR pass:   --out results/mlr        --no-tabpfn
+  v2.6 pass:  --out results/tabpfn_v2_6 --no-mlr --tabpfn-weights v2_6
+  v2 pass:    --out results/tabpfn_v2   --no-mlr --tabpfn-weights v2
+              --no-weights-partition          (suppresses the auto
+                                               weights_v2/ subdir so the
+                                               output lands directly under
+                                               results/tabpfn_v2/)
 
 Edit the constants at the top to override. Errors abort the whole run
 (`subprocess.run(..., check=True)`).
@@ -38,11 +50,18 @@ SHIP_DATASETS: list[str] = sorted(
 
 SEEDS = [1, 2, 3]
 K_LIST = "1"
-# k=1 + jitter == exact under the anchor-preservation rule in
-# duplicate_context (the only "tile" IS the anchor, so no perturbation
-# happens). Skip jitter to halve the per-fold work; flip to
-# "exact,jitter" if you specifically want both modes recorded.
 MODES = "exact"
+
+# Three independent passes per dataset. Each entry:
+#   (out-folder, model-flag, *extra args)
+# The model-flag picks exactly one model; the extras pin the TabPFN
+# checkpoint when applicable. Drop a row to skip that pass.
+PASSES: list[tuple[str, list[str]]] = [
+    ("mlr",          ["--no-tabpfn"]),
+    ("tabpfn_v2_6",  ["--no-mlr", "--tabpfn-weights", "v2_6"]),
+    ("tabpfn_v2",    ["--no-mlr", "--tabpfn-weights", "v2",
+                      "--no-weights-partition"]),
+]
 
 PY = os.environ.get("PY", sys.executable)
 SEEDS_CSV = ",".join(str(s) for s in SEEDS)
@@ -70,35 +89,49 @@ def main() -> int:
         )
         return 1
 
+    total = len(PASSES) * len(SHIP_DATASETS)
+    pass_names = [name for name, _ in PASSES]
     banner(
         f"LOO baseline · k=1 · modes={MODES} · seeds={SEEDS_CSV} · "
-        f"{len(SHIP_DATASETS)} dataset(s)"
+        f"passes={','.join(pass_names)} · {total} run(s)"
     )
     print(f"  datasets: {', '.join(SHIP_DATASETS)}")
 
-    for ds in SHIP_DATASETS:
-        banner(f"DATASET = {ds}", char="=", width=72)
-        run(
-            [
-                PY, "scripts/run_row_probe.py",
-                "--dataset", ds,
-                "--split-mode", "loo",
-                "--k-list", K_LIST,
-                "--modes", MODES,
-                "--seeds", SEEDS_CSV,
-                *FRESH_FLAG,
-                "-v",
-            ]
-        )
+    combo = 0
+    for out_name, extra_args in PASSES:
+        banner(f"PASS = {out_name}", char="█", width=80)
+        out_root = REPO / "results" / out_name
+        for ds in SHIP_DATASETS:
+            combo += 1
+            banner(
+                f"({combo}/{total})  {out_name}  ·  dataset={ds}",
+                char="=", width=72,
+            )
+            run(
+                [
+                    PY, "scripts/run_row_probe.py",
+                    "--dataset", ds,
+                    "--split-mode", "loo",
+                    "--k-list", K_LIST,
+                    "--modes", MODES,
+                    "--seeds", SEEDS_CSV,
+                    "--out", str(out_root),
+                    *extra_args,
+                    *FRESH_FLAG,
+                    "-v",
+                ]
+            )
 
     print()
     print("=================== ALL DONE ===================")
     print(f"Datasets ran: {', '.join(SHIP_DATASETS)}")
+    print(f"Passes: {', '.join(pass_names)}")
     print(f"Seeds: {SEEDS_CSV}   k_list: {K_LIST}   modes: {MODES}")
     print()
-    print("Results landed at (unpartitioned baseline tree):")
-    for ds in SHIP_DATASETS:
-        print(f"  results/{ds}/row/metrics.jsonl")
+    print("Results landed at (one folder per model, no record mixing):")
+    for name, _ in PASSES:
+        for ds in SHIP_DATASETS:
+            print(f"  results/{name}/{ds}/row/metrics.jsonl")
     print()
     print("To regenerate PNGs and view in browser:")
     print("  python scripts/rebuild_reports.py -v")
