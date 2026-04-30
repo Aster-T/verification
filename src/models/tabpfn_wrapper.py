@@ -111,13 +111,27 @@ def _sdpa_capture_factory(captured: list, current_layer_idx: list):
     output back so shape isn't a concern for them.
     """
 
-    def sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False,
-            scale=None, enable_gqa=False):
+    def sdpa(
+        query,
+        key,
+        value,
+        attn_mask=None,
+        dropout_p=0.0,
+        is_causal=False,
+        scale=None,
+        enable_gqa=False,
+    ):
         if attn_mask is not None or is_causal:
             # TabPFN feature-attn doesn't use these, but fall back safely if it ever does.
             return F._orig_sdpa(  # type: ignore[attr-defined]
-                query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
-                is_causal=is_causal, scale=scale, enable_gqa=enable_gqa,
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                scale=scale,
+                enable_gqa=enable_gqa,
             )
 
         d_k = query.shape[-1]
@@ -297,7 +311,8 @@ class TabPFNWithColAttn:
             random_state=self.seed,
             ignore_pretraining_limits=True,
             inference_config=_build_inference_config_overrides(
-                cat_name, preprocess_y=self.preprocess_y,
+                cat_name,
+                preprocess_y=self.preprocess_y,
             ),
         )
 
@@ -310,6 +325,7 @@ class TabPFNWithColAttn:
         if X_arr.dtype != object:
             return X_arr
         import pandas as pd  # noqa: PLC0415  (lazy)
+
         df = pd.DataFrame(X_arr).copy()
         for j in range(df.shape[1]):
             col = df.iloc[:, j]
@@ -391,7 +407,9 @@ class TabPFNWithColAttn:
             by_layer.setdefault(layer_idx, []).append(attn)
 
         f = self._n_features if self._n_features is not None else None
-        features_per_group = int(getattr(self._inner_model, "features_per_group", 1) or 1)
+        features_per_group = int(
+            getattr(self._inner_model, "features_per_group", 1) or 1
+        )
 
         layer_ids = sorted(by_layer.keys())
         per_layer = []
@@ -402,7 +420,8 @@ class TabPFNWithColAttn:
             g = mean_bh.shape[0] - 1
             group_attn = mean_bh[:g, :g]  # (G, G)
             expanded = _expand_group_attn_to_feature(
-                group_attn, n_features=f if f is not None else g * features_per_group,
+                group_attn,
+                n_features=f if f is not None else g * features_per_group,
                 features_per_group=features_per_group,
             )
             per_layer.append(expanded)
